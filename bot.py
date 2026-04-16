@@ -4,53 +4,337 @@ import logging
 import urllib.parse
 import urllib.request
 import asyncio
-import aiohttp
 import random
-import json
+import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ConversationHandler
+from PIL import Image, ImageDraw, ImageFont
+import textwrap
 
 # تفعيل التسجيل
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("BOT_TOKEN")
 
 # حالات المحادثة
-CHOOSING_ACTION, CHOOSING_AUDIO_GENDER, WAITING_FOR_TEXT_AUDIO, WAITING_FOR_TEXT_IMAGE = range(4)
+CHOOSING_ACTION, CHOOSING_AUDIO_GENDER, WAITING_FOR_TEXT_AUDIO, WAITING_FOR_TEXT_IMAGE, WAITING_FOR_EXPLAIN = range(5)
 
 # تخزين بيانات المستخدمين
 user_choices = {}
 
-# ========== تحليل النص (أي لغة) ==========
-async def analyze_text_universal(text: str):
-    """تحليل النص لأي لغة"""
-    words = text.split()
-    chars = len(text)
+# ========== قاموس الشخصيات الكرتونية ==========
+CARTOON_CHARACTERS = {
+    'ولد': ['boy', '👦', 'طفل', 'صبي'],
+    'بنت': ['girl', '👧', 'طفلة', 'بنت صغيرة'],
+    'قطة': ['cat', '🐱', 'قط', 'هرة'],
+    'كلب': ['dog', '🐶', 'جرو'],
+    'أسد': ['lion', '🦁'],
+    'فيل': ['elephant', '🐘'],
+    'زرافة': ['giraffe', '🦒'],
+    'دب': ['bear', '🐻', 'دب صغير'],
+    'أرنب': ['rabbit', '🐰'],
+    'بطة': ['duck', '🦆'],
+    'طائر': ['bird', '🐦'],
+    'سمكة': ['fish', '🐟', 'سمكة ذهبية'],
+    'فراشة': ['butterfly', '🦋'],
+    'نحلة': ['bee', '🐝'],
+    'شمس': ['sun', '☀️'],
+    'قمر': ['moon', '🌙'],
+    'نجمة': ['star', '⭐'],
+    'سحابة': ['cloud', '☁️'],
+    'زهرة': ['flower', '🌸', 'ورد'],
+    'شجرة': ['tree', '🌳'],
+    'منزل': ['house', '🏠', 'بيت'],
+    'سيارة': ['car', '🚗'],
+    'طائرة': ['airplane', '✈️'],
+    'كرة': ['ball', '⚽', 'كرة قدم'],
+    'دراجة': ['bike', '🚲'],
+    'كتاب': ['book', '📚'],
+    'قلم': ['pen', '✏️'],
+    'مدرسة': ['school', '🏫'],
+    'حديقة': ['garden', '🌿', 'منتزه', 'park'],
+    'بحر': ['sea', '🌊', 'مح'],
+    'جبل': ['mountain', '⛰️'],
+}
+
+# ========== تحليل النص واستخراج الكلمات المفتاحية ==========
+def extract_keywords(text: str):
+    """استخراج الكلمات المفتاحية من النص لصناعة الصورة"""
+    text_lower = text.lower()
+    found_characters = []
+    found_places = []
+    found_objects = []
     
+    for keyword, variants in CARTOON_CHARACTERS.items():
+        for variant in variants:
+            if variant in text_lower or variant in text:
+                if keyword in ['ولد', 'بنت', 'قطة', 'كلب', 'أسد', 'فيل', 'زرافة', 'دب', 'أرنب', 'بطة', 'طائر', 'سمكة']:
+                    found_characters.append(keyword)
+                elif keyword in ['حديقة', 'بحر', 'جبل', 'مدرسة', 'منزل']:
+                    found_places.append(keyword)
+                else:
+                    found_objects.append(keyword)
+                break
+    
+    # إزالة التكرارات
+    found_characters = list(set(found_characters))
+    found_places = list(set(found_places))
+    found_objects = list(set(found_objects))
+    
+    return {
+        'characters': found_characters if found_characters else ['ولد'],
+        'places': found_places if found_places else ['حديقة'],
+        'objects': found_objects,
+        'original_text': text[:200]
+    }
+
+# ========== صناعة صورة كرتونية محلياً ==========
+async def create_cartoon_image(text: str, update: Update):
+    """صناعة صورة كرتونية بناءً على النص"""
+    
+    # إرسال رسالة المعالجة
+    processing_msg = await update.message.reply_text("🎨 **جاري تحليل النص وصناعة الصورة الكرتونية...**")
+    
+    await asyncio.sleep(0.5)
+    await processing_msg.edit_text("📖 **جاري تحليل النص وفهمه...**")
+    
+    # استخراج الكلمات المفتاحية
+    keywords = extract_keywords(text)
+    
+    await processing_msg.edit_text(f"🎭 **الكلمات المفتاحية المستخرجة:**\nشخصية: {', '.join(keywords['characters'])}\nمكان: {', '.join(keywords['places'])}")
+    
+    await asyncio.sleep(0.5)
+    await processing_msg.edit_text("🖌 **جاري رسم الصورة الكرتونية...**")
+    
+    try:
+        # إعداد الصورة
+        img_width = 800
+        img_height = 600
+        bg_color = (135, 206, 235)  # أزرق سماوي (سماء)
+        
+        # ألوان الخلفية حسب المكان
+        if 'بحر' in keywords['places']:
+            bg_color = (0, 105, 148)  # أزرق بحري
+        elif 'جبل' in keywords['places']:
+            bg_color = (34, 139, 34)  # أخضر غامق
+        elif 'مدرسة' in keywords['places']:
+            bg_color = (255, 228, 196)  # بيج
+        elif 'ليل' in text.lower() or 'قمر' in text.lower():
+            bg_color = (25, 25, 112)  # أزرق داكن (ليل)
+        
+        # إنشاء الصورة
+        img = Image.new('RGB', (img_width, img_height), color=bg_color)
+        draw = ImageDraw.Draw(img)
+        
+        # رسم السماء (إذا كانت خلفية السماء)
+        if bg_color == (135, 206, 235):
+            draw.rectangle([0, 0, img_width, img_height//2], fill=(135, 206, 235))
+            draw.rectangle([0, img_height//2, img_width, img_height], fill=(34, 139, 34))  # أرض
+        
+        # رسم الشمس أو القمر
+        if 'شمس' in keywords['objects'] or 'نهار' in text.lower():
+            draw.ellipse([img_width-100, 50, img_width-30, 130], fill=(255, 255, 0))  # شمس
+        elif 'قمر' in keywords['objects'] or 'ليل' in text.lower():
+            draw.ellipse([img_width-100, 50, img_width-30, 130], fill=(255, 255, 200))  # قمر
+        
+        # رسم سحاب
+        if 'سحابة' in keywords['objects'] or random.random() > 0.7:
+            draw.ellipse([100, 80, 160, 140], fill=(255, 255, 255))
+            draw.ellipse([130, 70, 190, 130], fill=(255, 255, 255))
+            draw.ellipse([160, 80, 220, 140], fill=(255, 255, 255))
+        
+        # رسم الشخصية الرئيسية
+        character = keywords['characters'][0]
+        center_x = img_width // 2
+        ground_y = img_height - 150
+        
+        # جسم الشخصية
+        if character == 'ولد':
+            # رسم ولد
+            draw.ellipse([center_x-40, ground_y-80, center_x+40, ground_y], fill=(255, 200, 150))  # وجه
+            draw.ellipse([center_x-25, ground_y-60, center_x-10, ground_y-45], fill=(0, 0, 0))  # عين يسار
+            draw.ellipse([center_x+10, ground_y-60, center_x+25, ground_y-45], fill=(0, 0, 0))  # عين يمين
+            draw.arc([center_x-20, ground_y-40, center_x+20, ground_y-15], 0, 180, fill=(255, 100, 100), width=3)  # فم مبتسم
+            # شعر
+            draw.ellipse([center_x-45, ground_y-100, center_x+45, ground_y-70], fill=(139, 69, 19))
+            # جسد
+            draw.rectangle([center_x-30, ground_y, center_x+30, ground_y+60], fill=(100, 150, 255))  # قميص
+            # أرجل
+            draw.line([center_x-20, ground_y+60, center_x-25, ground_y+110], fill=(0, 0, 139), width=8)
+            draw.line([center_x+20, ground_y+60, center_x+25, ground_y+110], fill=(0, 0, 139), width=8)
+            # أيدي
+            draw.line([center_x-30, ground_y+20, center_x-60, ground_y+50], fill=(255, 200, 150), width=8)
+            draw.line([center_x+30, ground_y+20, center_x+60, ground_y+50], fill=(255, 200, 150), width=8)
+            
+        elif character == 'بنت':
+            # رسم بنت
+            draw.ellipse([center_x-40, ground_y-80, center_x+40, ground_y], fill=(255, 220, 180))  # وجه
+            draw.ellipse([center_x-25, ground_y-60, center_x-10, ground_y-45], fill=(0, 0, 0))  # عين يسار
+            draw.ellipse([center_x+10, ground_y-60, center_x+25, ground_y-45], fill=(0, 0, 0))  # عين يمين
+            draw.arc([center_x-20, ground_y-40, center_x+20, ground_y-15], 0, 180, fill=(255, 100, 100), width=3)  # فم مبتسم
+            # شعر طويل
+            draw.ellipse([center_x-45, ground_y-100, center_x+45, ground_y-70], fill=(255, 200, 0))
+            draw.line([center_x-40, ground_y-70, center_x-50, ground_y-40], fill=(255, 200, 0), width=10)
+            draw.line([center_x+40, ground_y-70, center_x+50, ground_y-40], fill=(255, 200, 0), width=10)
+            # فستان
+            draw.rectangle([center_x-35, ground_y, center_x+35, ground_y+70], fill=(255, 100, 150))
+            # أرجل
+            draw.line([center_x-20, ground_y+70, center_x-25, ground_y+110], fill=(255, 200, 150), width=8)
+            draw.line([center_x+20, ground_y+70, center_x+25, ground_y+110], fill=(255, 200, 150), width=8)
+            
+        elif character == 'قطة':
+            # رسم قطة
+            draw.ellipse([center_x-35, ground_y-60, center_x+35, ground_y], fill=(255, 140, 0))  # جسم
+            draw.ellipse([center_x-20, ground_y-80, center_x+20, ground_y-50], fill=(255, 140, 0))  # رأس
+            draw.polygon([center_x-25, ground_y-80, center_x-35, ground_y-100, center_x-15, ground_y-85], fill=(255, 140, 0))  # أذن يسار
+            draw.polygon([center_x+25, ground_y-80, center_x+35, ground_y-100, center_x+15, ground_y-85], fill=(255, 140, 0))  # أذن يمين
+            draw.ellipse([center_x-12, ground_y-70, center_x-5, ground_y-63], fill=(0, 0, 0))  # عين يسار
+            draw.ellipse([center_x+5, ground_y-70, center_x+12, ground_y-63], fill=(0, 0, 0))  # عين يمين
+            draw.ellipse([center_x-3, ground_y-58, center_x+3, ground_y-52], fill=(255, 100, 100))  # أنف
+            # ذيل
+            draw.line([center_x+35, ground_y-40, center_x+60, ground_y-60], fill=(255, 140, 0), width=8)
+            
+        elif character == 'كلب':
+            # رسم كلب
+            draw.ellipse([center_x-40, ground_y-70, center_x+40, ground_y], fill=(160, 82, 45))  # جسم
+            draw.ellipse([center_x-25, ground_y-90, center_x+25, ground_y-60], fill=(160, 82, 45))  # رأس
+            draw.ellipse([center_x-15, ground_y-80, center_x-8, ground_y-73], fill=(0, 0, 0))  # عين يسار
+            draw.ellipse([center_x+8, ground_y-80, center_x+15, ground_y-73], fill=(0, 0, 0))  # عين يمين
+            draw.ellipse([center_x-3, ground_y-70, center_x+3, ground_y-64], fill=(0, 0, 0))  # أنف
+            # أذنين
+            draw.ellipse([center_x-40, ground_y-85, center_x-25, ground_y-70], fill=(139, 69, 19))
+            draw.ellipse([center_x+25, ground_y-85, center_x+40, ground_y-70], fill=(139, 69, 19))
+        
+        # رسم مكان (حديقة، بحر، الخ)
+        if 'حديقة' in keywords['places']:
+            # رسم زهور
+            for i in range(5):
+                flower_x = 50 + i * 150
+                draw.ellipse([flower_x, img_height-80, flower_x+20, img_height-60], fill=(255, 100, 100))
+                draw.ellipse([flower_x+5, img_height-90, flower_x+15, img_height-80], fill=(255, 255, 0))
+                draw.line([flower_x+10, img_height-60, flower_x+10, img_height-40], fill=(0, 100, 0), width=3)
+        
+        elif 'بحر' in keywords['places']:
+            # رسم أمواج البحر
+            for i in range(5):
+                wave_y = img_height - 100 + i * 20
+                draw.arc([0, wave_y, img_width, wave_y+30], 0, 180, fill=(0, 191, 255), width=5)
+        
+        # رسم نص الصورة (الوصف)
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+        except:
+            font = ImageFont.load_default()
+        
+        # نص قصير في الأسفل
+        short_text = text[:80] + "..." if len(text) > 80 else text
+        wrapped_text = textwrap.wrap(short_text, width=35)
+        y_text = img_height - 40
+        for line in wrapped_text:
+            draw.text((50, y_text), line, fill=(0, 0, 0), font=font)
+            y_text += 25
+        
+        # حفظ الصورة
+        img_buffer = io.BytesIO()
+        img.save(img_buffer, format='PNG')
+        img_buffer.seek(0)
+        img_buffer.name = "cartoon_image.png"
+        
+        await processing_msg.delete()
+        
+        # إرسال الصورة
+        await update.message.reply_photo(
+            photo=img_buffer,
+            caption=f"🎨 **صورة كرتونية**\n\n📝 **الوصف:** {text[:150]}...\n\n🎭 **الشخصية:** {character}\n📍 **المكان:** {', '.join(keywords['places'])}"
+        )
+        
+        await update.message.reply_text("✅ **تم صناعة الصورة الكرتونية بنجاح!**")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error creating image: {e}")
+        await processing_msg.edit_text(f"❌ حدث خطأ في صناعة الصورة: {str(e)[:100]}")
+        return False
+
+# ========== شرح النص بشكل مفصل ==========
+async def explain_text(text: str, update: Update):
+    """شرح النص بشكل مفصل"""
+    
+    processing_msg = await update.message.reply_text("📖 **جاري تحليل وشرح النص...**")
+    
+    await asyncio.sleep(0.5)
+    
+    # تحليل النص
+    words = text.split()
+    sentences = text.count('.') + text.count('!') + text.count('?') + text.count('؟')
+    
+    # اكتشاف اللغة
     has_arabic = any('\u0600' <= c <= '\u06FF' for c in text)
     has_english = any('a' <= c.lower() <= 'z' for c in text)
     
-    if has_arabic:
-        language = "العربية"
-    elif has_english:
-        language = "الإنجليزية"
+    if has_arabic and has_english:
+        language = "عربي + إنجليزي (مختلط)"
+    elif has_arabic:
+        language = "عربي"
     else:
-        language = "غير معروف"
+        language = "إنجليزي"
     
-    sentences = text.count('.') + text.count('!') + text.count('?') + text.count('؟')
+    # استخراج الكلمات المفتاحية للشرح
+    keywords = extract_keywords(text)
     
-    return {
-        'language': language,
-        'char_count': chars,
-        'word_count': len(words),
-        'sentence_count': sentences if sentences > 0 else 1
-    }
+    # بناء شرح مفصل
+    explanation = f"""
+📚 **شرح وتحليل النص**
 
-# ========== بدائل الصوت المجانية ==========
+━━━━━━━━━━━━━━━━━━━━━━
+📝 **النص الأصلي:**
+{text}
 
+━━━━━━━━━━━━━━━━━━━━━━
+📊 **الإحصائيات:**
+• عدد الحروف: {len(text)}
+• عدد الكلمات: {len(words)}
+• عدد الجمل: {sentences if sentences > 0 else 1}
+• عدد المسافات: {text.count(' ')}
+• الأرقام في النص: {sum(c.isdigit() for c in text)}
+
+━━━━━━━━━━━━━━━━━━━━━━
+🌐 **اللغة:** {language}
+
+━━━━━━━━━━━━━━━━━━━━━━
+🎭 **الكلمات المفتاحية المستخرجة:**
+• شخصيات: {', '.join(keywords['characters']) if keywords['characters'] else 'غير محدد'}
+• أماكن: {', '.join(keywords['places']) if keywords['places'] else 'غير محدد'}
+• أشياء: {', '.join(keywords['objects']) if keywords['objects'] else 'غير محدد'}
+
+━━━━━━━━━━━━━━━━━━━━━━
+📏 **تقييم النص:**
+• الطول: {'قصير جداً' if len(words) < 5 else 'قصير' if len(words) < 15 else 'متوسط' if len(words) < 40 else 'طويل'}
+• التعقيد: {'بسيط' if len(words) < 20 else 'متوسط' if len(words) < 50 else 'معقد'}
+
+━━━━━━━━━━━━━━━━━━━━━━
+💡 **ملخص النص:**
+{text[:300]}{'...' if len(text) > 300 else ''}
+
+✅ **تم التحليل والشرح بنجاح**
+"""
+    
+    await processing_msg.delete()
+    
+    # تقسيم الشرح إذا كان طويلاً
+    if len(explanation) > 4000:
+        part1 = explanation[:3500]
+        part2 = explanation[3500:]
+        await update.message.reply_text(part1)
+        await update.message.reply_text(part2)
+    else:
+        await update.message.reply_text(explanation)
+
+# ========== تحويل النص إلى صوت ==========
 async def google_tts(text: str, lang: str, gender: str, update: Update):
     try:
-        lang_codes = {'ar': 'ar', 'en': 'en', 'fr': 'fr', 'de': 'de', 'es': 'es'}
+        lang_codes = {'ar': 'ar', 'en': 'en'}
         lang_code = lang_codes.get(lang, 'ar')
         
         text_encoded = urllib.parse.quote(text[:300])
@@ -74,277 +358,39 @@ async def google_tts(text: str, lang: str, gender: str, update: Update):
     except:
         return False
 
-async def voicerss_tts(text: str, lang: str, gender: str, update: Update):
-    try:
-        api_key = "bc0b5b2b0b1b4b0b8b0b0b0b0b0b0b0"
-        voices = {
-            ('ar', 'male'): 'Youssef',
-            ('ar', 'female'): 'Amina',
-            ('en', 'male'): 'John',
-            ('en', 'female'): 'Linda',
-        }
-        voice = voices.get((lang, gender), 'Amina' if gender == 'female' else 'Youssef')
-        
-        params = {
-            "key": api_key,
-            "hl": lang,
-            "src": text[:300],
-            "f": "44khz_16bit_stereo",
-            "c": "MP3",
-            "v": voice
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get("http://api.voicerss.org/", params=params) as resp:
-                if resp.status == 200:
-                    audio_data = await resp.read()
-                    if len(audio_data) > 2000:
-                        audio_file = io.BytesIO(audio_data)
-                        audio_file.name = "voicerss.mp3"
-                        await update.message.reply_audio(
-                            audio=audio_file,
-                            title="VoiceRSS",
-                            performer=f"{'ذكر' if gender=='male' else 'أنثى'}",
-                            caption="✅ تم تحويل النص إلى صوت"
-                        )
-                        return True
-        return False
-    except:
-        return False
-
-# ========== بدائل الصور المجانية (توليد صور كرتونية من النص) ==========
-
-# البديل 1: Pollinations API (مجاني، يولد صور كرتونية)
-async def pollinations_image(prompt: str, update: Update):
-    """توليد صورة كرتونية باستخدام Pollinations API (مجاني)"""
-    try:
-        # إضافة كلمات مفتاحية للحصول على صور كرتونية
-        cartoon_prompt = f"cartoon character, {prompt}, animated style, colorful, cute"
-        encoded_prompt = urllib.parse.quote(cartoon_prompt)
-        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=512&height=512&nologo=true"
-        
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=30) as response:
-            image_data = response.read()
-        
-        if len(image_data) > 1000:
-            image_file = io.BytesIO(image_data)
-            image_file.name = "cartoon_image.png"
-            await update.message.reply_photo(
-                photo=image_file,
-                caption=f"🖼 صورة كرتونية\n📝 الوصف: {prompt[:100]}..."
-            )
-            return True
-        return False
-    except Exception as e:
-        logging.error(f"Pollinations error: {e}")
-        return False
-
-# البديل 2: Lexica API (مجاني، يولد صور كرتونية)
-async def lexica_image(prompt: str, update: Update):
-    """توليد صورة كرتونية باستخدام Lexica API (مجاني)"""
-    try:
-        cartoon_prompt = f"cartoon style, animated character, {prompt}"
-        encoded_prompt = urllib.parse.quote(cartoon_prompt)
-        url = f"https://lexica.art/api/v1/search?q={encoded_prompt}"
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=15) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('images') and len(data['images']) > 0:
-                        image_url = data['images'][0].get('src')
-                        if image_url:
-                            async with session.get(image_url) as img_resp:
-                                image_data = await img_resp.read()
-                                image_file = io.BytesIO(image_data)
-                                image_file.name = "lexica_image.png"
-                                await update.message.reply_photo(
-                                    photo=image_file,
-                                    caption=f"🎨 صورة كرتونية\n📝 {prompt[:100]}..."
-                                )
-                                return True
-        return False
-    except:
-        return False
-
-# البديل 3: Craiyon API (مجاني، مشهور للصور الكرتونية)
-async def craiyon_image(prompt: str, update: Update):
-    """توليد صورة كرتونية باستخدام Craiyon API (مجاني)"""
-    try:
-        cartoon_prompt = f"cartoon drawing, {prompt}, cute style"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://backend.craiyon.com/generate",
-                json={"prompt": cartoon_prompt},
-                timeout=30
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('images') and len(data['images']) > 0:
-                        import base64
-                        image_data = base64.b64decode(data['images'][0])
-                        image_file = io.BytesIO(image_data)
-                        image_file.name = "craiyon_image.png"
-                        await update.message.reply_photo(
-                            photo=image_file,
-                            caption=f"🎭 صورة كرتونية (Craiyon)\n📝 {prompt[:100]}..."
-                        )
-                        return True
-        return False
-    except:
-        return False
-
-# البديل 4: OpenAI DALL-E مجاني عبر Proxy (تجريبي)
-async def dalle_free_image(prompt: str, update: Update):
-    """توليد صورة باستخدام DALL-E مجاني"""
-    try:
-        cartoon_prompt = f"cartoon character illustration, {prompt}, vibrant colors"
-        encoded_prompt = urllib.parse.quote(cartoon_prompt)
-        url = f"https://tiny-img.com/api/generate?prompt={encoded_prompt}"
-        
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=20) as response:
-            image_data = response.read()
-        
-        if len(image_data) > 1000:
-            image_file = io.BytesIO(image_data)
-            image_file.name = "dalle_image.png"
-            await update.message.reply_photo(
-                photo=image_file,
-                caption=f"✨ صورة كرتونية\n📝 {prompt[:100]}..."
-            )
-            return True
-        return False
-    except:
-        return False
-
-# البديل 5: Playground AI مجاني
-async def playground_image(prompt: str, update: Update):
-    """توليد صورة كرتونية"""
-    try:
-        cartoon_prompt = f"anime cartoon style, {prompt}, high quality"
-        encoded_prompt = urllib.parse.quote(cartoon_prompt)
-        url = f"https://playgroundai.com/api/generate?prompt={encoded_prompt}"
-        
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=20) as response:
-            image_data = response.read()
-        
-        if len(image_data) > 1000:
-            image_file = io.BytesIO(image_data)
-            image_file.name = "playground_image.png"
-            await update.message.reply_photo(
-                photo=image_file,
-                caption=f"🌟 صورة كرتونية\n📝 {prompt[:100]}..."
-            )
-            return True
-        return False
-    except:
-        return False
-
-# ========== الوظيفة الرئيسية لتوليد الصور ==========
-async def generate_cartoon_image(prompt: str, update: Update):
-    """محاولة كل البدائل المجانية لتوليد صورة كرتونية"""
-    
-    # إرسال رسالة المعالجة
-    processing_msg = await update.message.reply_text(
-        f"🎨 **جاري توليد صورة كرتونية...**\n\n"
-        f"📝 الوصف: {prompt[:150]}\n\n"
-        f"🔄 أجرب جميع البدائل المجانية..."
-    )
-    
-    await asyncio.sleep(1)
-    await processing_msg.edit_text("🖼 محاولة Pollinations API... (1/5)")
-    
-    success = False
-    
-    # البديل 1
-    if not success:
-        success = await pollinations_image(prompt, update)
-        if not success:
-            await processing_msg.edit_text("🖼 محاولة Lexica API... (2/5)")
-    
-    # البديل 2
-    if not success:
-        success = await lexica_image(prompt, update)
-        if not success:
-            await processing_msg.edit_text("🖼 محاولة Craiyon API... (3/5)")
-    
-    # البديل 3
-    if not success:
-        success = await craiyon_image(prompt, update)
-        if not success:
-            await processing_msg.edit_text("🖼 محاولة DALL-E Proxy... (4/5)")
-    
-    # البديل 4
-    if not success:
-        success = await dalle_free_image(prompt, update)
-        if not success:
-            await processing_msg.edit_text("🖼 محاولة Playground AI... (5/5)")
-    
-    # البديل 5
-    if not success:
-        success = await playground_image(prompt, update)
-    
-    if success:
-        await processing_msg.delete()
-        await update.message.reply_text("✅ تم توليد الصورة الكرتونية بنجاح!")
-    else:
-        await processing_msg.edit_text(
-            "❌ عذراً، جميع خدمات توليد الصور غير متاحة حالياً.\n\n"
-            "💡 **بدائل يدوية:**\n"
-            "• جرب وصفاً أقصر (أقل من 100 حرف)\n"
-            "• جرب وصفاً باللغة الإنجليزية\n"
-            "• مثال: 'a boy playing in garden'\n"
-            "• مثال: 'cartoon cat sitting on chair'"
-        )
-
-# ========== الوظيفة الرئيسية للصوت ==========
 async def generate_audio(text: str, gender: str, update: Update):
-    """تحويل النص إلى صوت بكل البدائل"""
+    """تحويل النص إلى صوت"""
     
-    # تحليل النص
-    analysis = await analyze_text_universal(text)
+    # تحليل النص أولاً
+    has_arabic = any('\u0600' <= c <= '\u06FF' for c in text)
+    lang = 'ar' if has_arabic else 'en'
     
-    await update.message.reply_text(
-        f"📊 **تحليل النص:**\n\n"
-        f"🌐 اللغة: {analysis['language']}\n"
-        f"📝 عدد الحروف: {analysis['char_count']}\n"
-        f"📖 عدد الكلمات: {analysis['word_count']}\n\n"
-        f"🎙 جاري تحويل النص إلى صوت {'(ذكر)' if gender=='male' else '(أنثى)'}...",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(f"🎙 **جاري تحويل النص إلى صوت {'(ذكر)' if gender=='male' else '(أنثى)'}...**")
     
-    lang = 'ar' if analysis['language'] == 'العربية' else 'en'
-    
-    success = False
-    
-    if not success:
-        success = await google_tts(text, lang, gender, update)
-    if not success:
-        success = await voicerss_tts(text, lang, gender, update)
+    success = await google_tts(text, lang, gender, update)
     
     if success:
         await update.message.reply_text("✅ تم تحويل النص إلى صوت بنجاح!")
     else:
-        await update.message.reply_text("❌ عذراً، خدمات الصوت غير متاحة حالياً. حاول بنص أقصر.")
+        await update.message.reply_text("❌ عذراً، خدمة الصوت غير متاحة حالياً. حاول بنص أقصر.")
 
 # ========== أوامر البوت ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🎵 صناعة صوت", callback_data="action_audio")],
         [InlineKeyboardButton("🎨 صناعة صورة كرتونية", callback_data="action_image")],
+        [InlineKeyboardButton("📖 شرح النص", callback_data="action_explain")],
     ]
     
     await update.message.reply_text(
         "✨ **مرحباً بك في البوت المتكامل!** ✨\n\n"
-        "🎵 **صناعة صوت:** يحول أي نص إلى صوت MP3 (ذكر/أنثى)\n"
-        "🎨 **صناعة صورة كرتونية:** يحول أي وصف إلى صورة كرتونية\n\n"
-        "📝 **مثال للصورة:**\n"
-        "• 'ولد في حديقة'\n"
-        "• 'بنت مع قطة'\n"
-        "• 'منزل كرتوني'\n\n"
+        "📌 **الخدمات المتاحة:**\n\n"
+        "🎵 **صناعة صوت:** يحول أي نص إلى صوت MP3 (ذكر/أنثى)\n\n"
+        "🎨 **صناعة صورة كرتونية:** يحول أي وصف إلى صورة كرتونية\n"
+        "   • يدعم النصوص الطويلة ويقسمها\n"
+        "   • يستخرج الكلمات المفتاحية تلقائياً\n"
+        "   • يرسم شخصيات كرتونية (ولد، بنت، قطة، كلب...)\n\n"
+        "📖 **شرح النص:** يحلل أي نص ويعطيك شرحاً مفصلاً\n\n"
         "🔽 **اختر ما تريد:**",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
@@ -365,11 +411,8 @@ async def action_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔙 رجوع", callback_data="back_to_start")]
         ]
         await query.edit_message_text(
-            "🎤 **اختر نوع الصوت:**\n\n"
-            "👨 ذكر → صوت رجالي\n"
-            "👩 أنثى → صوت نسائي",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
+            "🎤 **اختر نوع الصوت:**\n\n👨 ذكر\n👩 أنثى",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return CHOOSING_AUDIO_GENDER
         
@@ -377,14 +420,26 @@ async def action_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "🎨 **صناعة صورة كرتونية**\n\n"
             "✏️ **أرسل وصف الصورة التي تريد:**\n\n"
-            "📝 أمثلة:\n"
-            "• ولد في حديقة\n"
+            "📝 **أمثلة:**\n"
+            "• ولد في حديقة مع زهور\n"
             "• بنت مع قطة صغيرة\n"
-            "• منزل كرتوني ملون\n"
-            "• غابة مع حيوانات\n\n"
-            "✅ سأحول وصفك إلى صورة كرتونية باستخدام 5 بدائل مجانية"
+            "• كلب يجري في الحديقة\n"
+            "• قطة نائمة تحت شجرة\n\n"
+            "✅ سأحلل النص وأصنع صورة كرتونية مناسبة"
         )
         return WAITING_FOR_TEXT_IMAGE
+        
+    elif action == "action_explain":
+        await query.edit_message_text(
+            "📖 **شرح النص**\n\n"
+            "✏️ **أرسل النص الذي تريد شرحه وتحليله:**\n\n"
+            "✅ سأقوم بتحليل النص وإعطائك:\n"
+            "• عدد الحروف والكلمات والجمل\n"
+            "• اللغة المكتشفة\n"
+            "• الكلمات المفتاحية المستخرجة\n"
+            "• ملخص النص"
+        )
+        return WAITING_FOR_EXPLAIN
 
 async def audio_gender_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -396,21 +451,14 @@ async def audio_gender_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
     if choice == "back_to_start":
         return await start(update, context)
     
-    if choice == "audio_male":
-        user_choices[user_id] = {'type': 'audio', 'gender': 'male'}
-        await query.edit_message_text(
-            "🎤 **صوت (ذكر)**\n\n"
-            "✏️ **أرسل النص الذي تريد تحويله إلى صوت:**"
-        )
-        return WAITING_FOR_TEXT_AUDIO
-        
-    elif choice == "audio_female":
-        user_choices[user_id] = {'type': 'audio', 'gender': 'female'}
-        await query.edit_message_text(
-            "🎤 **صوت (أنثى)**\n\n"
-            "✏️ **أرسل النص الذي تريد تحويله إلى صوت:**"
-        )
-        return WAITING_FOR_TEXT_AUDIO
+    gender = 'male' if choice == "audio_male" else 'female'
+    user_choices[user_id] = {'type': 'audio', 'gender': gender}
+    
+    await query.edit_message_text(
+        f"🎤 **تم اختيار {'ذكر' if gender=='male' else 'أنثى'}**\n\n"
+        "✏️ **أرسل النص الذي تريد تحويله إلى صوت:**"
+    )
+    return WAITING_FOR_TEXT_AUDIO
 
 async def receive_audio_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -429,6 +477,7 @@ async def receive_audio_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     keyboard = [
         [InlineKeyboardButton("🎵 صناعة صوت", callback_data="action_audio")],
         [InlineKeyboardButton("🎨 صناعة صورة كرتونية", callback_data="action_image")],
+        [InlineKeyboardButton("📖 شرح النص", callback_data="action_explain")],
     ]
     await update.message.reply_text(
         "✨ **هل تريد صناعة شيء آخر؟**",
@@ -439,15 +488,37 @@ async def receive_audio_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def receive_image_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     
-    await generate_cartoon_image(user_text, update)
+    # معالجة النص الطويل
+    if len(user_text) > 500:
+        await update.message.reply_text("📝 **نص طويل!** سأقوم بتقسيمه وتحليله...")
+    
+    await create_cartoon_image(user_text, update)
     
     # عرض القائمة مرة أخرى
     keyboard = [
         [InlineKeyboardButton("🎵 صناعة صوت", callback_data="action_audio")],
         [InlineKeyboardButton("🎨 صناعة صورة كرتونية", callback_data="action_image")],
+        [InlineKeyboardButton("📖 شرح النص", callback_data="action_explain")],
     ]
     await update.message.reply_text(
         "✨ **هل تريد صناعة شيء آخر؟**",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return CHOOSING_ACTION
+
+async def receive_explain_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
+    
+    await explain_text(user_text, update)
+    
+    # عرض القائمة مرة أخرى
+    keyboard = [
+        [InlineKeyboardButton("🎵 صناعة صوت", callback_data="action_audio")],
+        [InlineKeyboardButton("🎨 صناعة صورة كرتونية", callback_data="action_image")],
+        [InlineKeyboardButton("📖 شرح النص", callback_data="action_explain")],
+    ]
+    await update.message.reply_text(
+        "✨ **هل تريد تحليل نص آخر؟**",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return CHOOSING_ACTION
@@ -463,17 +534,18 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            CHOOSING_ACTION: [CallbackQueryHandler(action_choice, pattern="^(action_audio|action_image)$")],
+            CHOOSING_ACTION: [CallbackQueryHandler(action_choice, pattern="^(action_audio|action_image|action_explain)$")],
             CHOOSING_AUDIO_GENDER: [CallbackQueryHandler(audio_gender_choice, pattern="^(audio_male|audio_female|back_to_start)$")],
             WAITING_FOR_TEXT_AUDIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_audio_text)],
             WAITING_FOR_TEXT_IMAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_image_text)],
+            WAITING_FOR_EXPLAIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_explain_text)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
     
     app.add_handler(conv_handler)
     
-    print("✅ البوت يعمل - توليد صور كرتونية + تحويل نص إلى صوت")
+    print("✅ البوت يعمل - صناعة صور كرتونية محلية + صوت + شرح النص")
     app.run_polling()
 
 if __name__ == "__main__":
