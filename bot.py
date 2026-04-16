@@ -18,35 +18,89 @@ logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("BOT_TOKEN")
 
+# ========== مفاتيح API من Heroku ==========
+# DeepSeek Keys
+DEEPSEEK_KEYS = []
+for i in range(1, 10):  # deepseek_key1 إلى deepseek_key9
+    key = os.environ.get(f"DEEPSEEK_KEY{i}")
+    if key:
+        DEEPSEEK_KEYS.append(key)
+
+# Gemini Keys
+GEMINI_KEYS = []
+for i in range(1, 10):  # gemini_key1 إلى gemini_key9
+    key = os.environ.get(f"GEMINI_KEY{i}")
+    if key:
+        GEMINI_KEYS.append(key)
+
+# OpenRouter Keys
+OPENROUTER_KEYS = []
+for i in range(1, 10):  # openrouter_key1 إلى openrouter_key9
+    key = os.environ.get(f"OPENROUTER_KEY{i}")
+    if key:
+        OPENROUTER_KEYS.append(key)
+
 # حالات المحادثة
 CHOOSING_ACTION, CHOOSING_AUDIO_GENDER, WAITING_FOR_TEXT_AUDIO, WAITING_FOR_TEXT_IMAGE, WAITING_FOR_EXPLAIN = range(5)
 
 # تخزين بيانات المستخدمين
 user_choices = {}
 
-# ========== بدائل توليد الصور (8 بدائل مجانية) ==========
+# تخزين حالة المفاتيح (أي مفتاح يستخدم حالياً)
+key_states = {
+    'deepseek': {'keys': DEEPSEEK_KEYS, 'current_index': 0, 'failed_keys': set()},
+    'gemini': {'keys': GEMINI_KEYS, 'current_index': 0, 'failed_keys': set()},
+    'openrouter': {'keys': OPENROUTER_KEYS, 'current_index': 0, 'failed_keys': set()}
+}
 
-# بديل 1: Pollinations API
+# ========== بدائل توليد الصور (Pollinations أولاً) ==========
+
+# البديل 1: Pollinations (الأفضل - أولوية أولى)
 async def image_pollinations(prompt: str, update: Update):
+    """توليد صورة باستخدام Pollinations - يعمل دائماً"""
     try:
         clean_prompt = prompt.strip().replace(" ", "%20")
-        encoded_prompt = urllib.parse.quote(f"{clean_prompt}, cartoon style, colorful")
-        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=512&height=512&nologo=true"
+        encoded_prompt = urllib.parse.quote(f"{clean_prompt}, cartoon style, colorful, high quality")
+        # إضافة seed عشوائي للحصول على صور مختلفة
+        random_seed = random.randint(1, 100000)
+        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=512&height=512&nologo=true&seed={random_seed}"
         
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=20) as response:
+        with urllib.request.urlopen(req, timeout=30) as response:
             image_data = response.read()
         
         if len(image_data) > 1000:
             image_file = io.BytesIO(image_data)
             image_file.name = "pollinations.png"
-            await update.message.reply_photo(photo=image_file, caption=f"🎨 صورة من Pollinations\n📝 {prompt[:100]}")
+            await update.message.reply_photo(
+                photo=image_file, 
+                caption=f"🎨 **صورة من Pollinations AI**\n\n📝 **الوصف:** {prompt[:150]}...\n\n✅ تم التوليد بنجاح!"
+            )
             return True
+        return False
+    except Exception as e:
+        logger.error(f"Pollinations error: {e}")
+        return False
+
+# بديل احتياطي 1: Craiyon
+async def image_craiyon(prompt: str, update: Update):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post("https://backend.craiyon.com/generate", json={"prompt": f"cartoon, {prompt}"}, timeout=25) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    images = data.get('images', [])
+                    if images and len(images) > 0:
+                        image_data = base64.b64decode(images[0])
+                        image_file = io.BytesIO(image_data)
+                        image_file.name = "craiyon.png"
+                        await update.message.reply_photo(photo=image_file, caption=f"🎨 صورة من Craiyon (بديل)\n📝 {prompt[:100]}")
+                        return True
         return False
     except:
         return False
 
-# بديل 2: Lexica API
+# بديل احتياطي 2: Lexica
 async def image_lexica(prompt: str, update: Update):
     try:
         encoded_prompt = urllib.parse.quote(prompt)
@@ -65,357 +119,14 @@ async def image_lexica(prompt: str, update: Update):
                                 if len(image_data) > 1000:
                                     image_file = io.BytesIO(image_data)
                                     image_file.name = "lexica.png"
-                                    await update.message.reply_photo(photo=image_file, caption=f"🎨 صورة من Lexica\n📝 {prompt[:100]}")
+                                    await update.message.reply_photo(photo=image_file, caption=f"🎨 صورة من Lexica (بديل)\n📝 {prompt[:100]}")
                                     return True
         return False
     except:
         return False
 
-# بديل 3: Craiyon API
-async def image_craiyon(prompt: str, update: Update):
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post("https://backend.craiyon.com/generate", json={"prompt": f"cartoon, {prompt}"}, timeout=25) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    images = data.get('images', [])
-                    if images and len(images) > 0:
-                        image_data = base64.b64decode(images[0])
-                        image_file = io.BytesIO(image_data)
-                        image_file.name = "craiyon.png"
-                        await update.message.reply_photo(photo=image_file, caption=f"🎨 صورة من Craiyon\n📝 {prompt[:100]}")
-                        return True
-        return False
-    except:
-        return False
-
-# بديل 4: Playground AI Proxy
-async def image_playground(prompt: str, update: Update):
-    try:
-        encoded_prompt = urllib.parse.quote(f"cartoon illustration, {prompt}")
-        url = f"https://playgroundai.com/api/generate?prompt={encoded_prompt}"
-        
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=20) as response:
-            image_data = response.read()
-        
-        if len(image_data) > 1000:
-            image_file = io.BytesIO(image_data)
-            image_file.name = "playground.png"
-            await update.message.reply_photo(photo=image_file, caption=f"🎨 صورة من Playground\n📝 {prompt[:100]}")
-            return True
-        return False
-    except:
-        return False
-
-# بديل 5: DeepAI (مجاني مع مفتاح عام)
-async def image_deepai(prompt: str, update: Update):
-    try:
-        # DeepAI مفتاح عام مجاني
-        api_key = "quickstart-QUdJIGlzIGNvbWluZy4uLi4K"
-        url = "https://api.deepai.org/api/text2img"
-        
-        data = aiohttp.FormData()
-        data.add_field('text', f"cartoon style, {prompt}")
-        
-        headers = {'api-key': api_key}
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=data, headers=headers, timeout=25) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    image_url = result.get('output_url')
-                    if image_url:
-                        async with session.get(image_url) as img_resp:
-                            image_data = await img_resp.read()
-                            if len(image_data) > 1000:
-                                image_file = io.BytesIO(image_data)
-                                image_file.name = "deepai.png"
-                                await update.message.reply_photo(photo=image_file, caption=f"🎨 صورة من DeepAI\n📝 {prompt[:100]}")
-                                return True
-        return False
-    except:
-        return False
-
-# بديل 6: Stability AI مجاني عبر Proxy
-async def image_stability(prompt: str, update: Update):
-    try:
-        encoded_prompt = urllib.parse.quote(prompt)
-        url = f"https://stabilityai-whisper-medium.hf.space/api/predict?prompt={encoded_prompt}"
-        
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=20) as response:
-            data = json.loads(response.read())
-            image_url = data.get('image_url')
-            if image_url:
-                with urllib.request.urlopen(image_url) as img_resp:
-                    image_data = img_resp.read()
-                    image_file = io.BytesIO(image_data)
-                    image_file.name = "stability.png"
-                    await update.message.reply_photo(photo=image_file, caption=f"🎨 صورة من Stability AI\n📝 {prompt[:100]}")
-                    return True
-        return False
-    except:
-        return False
-
-# بديل 7: Hugging Face (نموذج مجاني)
-async def image_huggingface(prompt: str, update: Update):
-    try:
-        url = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-v1-5"
-        headers = {"Authorization": "Bearer hf_mock_token"}  # مفتاح تجريبي
-        
-        payload = {"inputs": f"cartoon style, {prompt}"}
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
-                if resp.status == 200:
-                    image_data = await resp.read()
-                    if len(image_data) > 1000:
-                        image_file = io.BytesIO(image_data)
-                        image_file.name = "huggingface.png"
-                        await update.message.reply_photo(photo=image_file, caption=f"🎨 صورة من Hugging Face\n📝 {prompt[:100]}")
-                        return True
-        return False
-    except:
-        return False
-
-# بديل 8: Clipdrop API مجاني
-async def image_clipdrop(prompt: str, update: Update):
-    try:
-        encoded_prompt = urllib.parse.quote(prompt)
-        url = f"https://clipdrop-api.co/text-to-image/v1/generate?text={encoded_prompt}"
-        
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=20) as response:
-            image_data = response.read()
-        
-        if len(image_data) > 1000:
-            image_file = io.BytesIO(image_data)
-            image_file.name = "clipdrop.png"
-            await update.message.reply_photo(photo=image_file, caption=f"🎨 صورة من Clipdrop\n📝 {prompt[:100]}")
-            return True
-        return False
-    except:
-        return False
-
-# ========== بدائل شرح النص (3 بدائل مجانية) ==========
-
-# بديل 1: تحليل محلي (بدون API)
-async def explain_local(text: str, update: Update):
-    """تحليل محلي للنص - يعمل دائماً"""
-    
-    words = text.split()
-    sentences = re.split(r'[.!?؟]+', text)
-    sentences = [s for s in sentences if s.strip()]
-    
-    # حساب الأحرف (بدون مسافات)
-    chars_no_spaces = len(text.replace(" ", "").replace("\n", ""))
-    
-    # اكتشاف اللغة
-    has_arabic = any('\u0600' <= c <= '\u06FF' for c in text)
-    has_english = any('a' <= c.lower() <= 'z' for c in text)
-    
-    if has_arabic and has_english:
-        language = "عربية + إنجليزية (مختلطة)"
-    elif has_arabic:
-        language = "عربية"
-    else:
-        language = "إنجليزية"
-    
-    # إحصائيات متقدمة
-    word_lengths = [len(w) for w in words]
-    avg_word_length = sum(word_lengths) / len(word_lengths) if words else 0
-    
-    # تكرار الكلمات
-    word_freq = {}
-    for word in words:
-        word_lower = word.lower()
-        word_freq[word_lower] = word_freq.get(word_lower, 0) + 1
-    
-    most_common = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:3]
-    
-    # بناء الشرح
-    explanation = f"""
-📚 **شرح وتحليل النص** 📚
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📝 **النص الأصلي:**
-{text[:500]}{'...' if len(text) > 500 else ''}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 **الإحصائيات الأساسية:**
-• عدد الحروف (مع المسافات): {len(text)}
-• عدد الحروف (بدون مسافات): {chars_no_spaces}
-• عدد الكلمات: {len(words)}
-• عدد الجمل: {len(sentences)}
-• متوسط طول الكلمة: {avg_word_length:.1f} حروف
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🌐 **اللغة المكتشفة:** {language}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📈 **تحليل الكلمات:**
-• أطول كلمة: {max(words, key=len) if words else 'لا توجد'}
-• أقصر كلمة: {min(words, key=len) if words else 'لا توجد'}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔝 **الكلمات الأكثر تكراراً:**
-"""
-    for word, count in most_common:
-        explanation += f"• '{word}': {count} مرة\n"
-    
-    # تحليل المشاعر الأساسي
-    positive_words = ['جميل', 'رائع', 'سعيد', 'فرح', 'حب', 'good', 'happy', 'love', 'beautiful', 'great']
-    negative_words = ['سيء', 'حزين', 'صعب', 'كئيب', 'bad', 'sad', 'hard', 'angry', 'hate', 'terrible']
-    
-    pos_count = sum(1 for word in words if word.lower() in positive_words)
-    neg_count = sum(1 for word in words if word.lower() in negative_words)
-    
-    if pos_count > neg_count:
-        sentiment = "😊 إيجابي"
-    elif neg_count > pos_count:
-        sentiment = "😔 سلبي"
-    else:
-        sentiment = "😐 محايد"
-    
-    explanation += f"""
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎭 **تحليل المشاعر:** {sentiment}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📏 **تقييم النص:**
-• الطول: {'قصير جداً' if len(words) < 10 else 'قصير' if len(words) < 20 else 'متوسط' if len(words) < 50 else 'طويل'}
-• التعقيد: {'بسيط' if avg_word_length < 5 else 'متوسط' if avg_word_length < 7 else 'معقد'}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-💡 **ملخص النص:**
-{text[:200]}{'...' if len(text) > 200 else ''}
-
-✅ **تم التحليل والشرح بنجاح**
-"""
-    
-    # تقسيم الشرح إذا كان طويلاً
-    if len(explanation) > 4000:
-        for i in range(0, len(explanation), 3500):
-            await update.message.reply_text(explanation[i:i+3500])
-    else:
-        await update.message.reply_text(explanation)
-    
-    return True
-
-# بديل 2: شرح باستخدام API مجاني (Text Analysis)
-async def explain_api(text: str, update: Update):
-    """شرح باستخدام API خارجي"""
-    try:
-        encoded_text = urllib.parse.quote(text[:500])
-        url = f"https://api.meaningcloud.com/summarization-1.0?key=mock_key&txt={encoded_text}&sentences=3"
-        
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read())
-            summary = data.get('summary', text[:300])
-            
-            await update.message.reply_text(
-                f"📚 **شرح النص (API)**\n\n"
-                f"📝 **الملخص:**\n{summary}\n\n"
-                f"✅ تم إنشاء هذا الشرح باستخدام خدمة خارجية"
-            )
-            return True
-    except:
-        return False
-
-# بديل 3: شرح بسيط مع تحليل ذكي
-async def explain_smart(text: str, update: Update):
-    """شرح ذكي باستخدام تحليل النص"""
-    
-    # تقسيم النص إلى جمل
-    sentences = re.split(r'[.!?؟]+', text)
-    sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
-    
-    # أهم جملة (أطول جملة عادة تحتوي على المعلومة الرئيسية)
-    main_sentence = max(sentences, key=len) if sentences else text[:200]
-    
-    # تحديد الموضوع الرئيسي
-    topics = []
-    topic_keywords = {
-        'قصة': ['كان', 'مرة', 'حدث', 'ذات', 'يوم'],
-        'وصف': ['جميل', 'كبير', 'صغير', 'لون', 'شكل'],
-        'مشاعر': ['سعيد', 'حزين', 'خائف', 'فرحان', 'زعلان'],
-        'حدث': ['ذهب', 'جاء', 'ركض', 'مشى', 'طار']
-    }
-    
-    for topic, keywords in topic_keywords.items():
-        for keyword in keywords:
-            if keyword in text.lower():
-                topics.append(topic)
-                break
-    
-    topics = list(set(topics)) if topics else ['عام']
-    
-    explanation = f"""
-🧠 **تحليل ذكي للنص**
-
-━━━━━━━━━━━━━━━━━━━━━━
-📖 **خلاصة النص:**
-{main_sentence[:200]}
-
-━━━━━━━━━━━━━━━━━━━━━━
-🏷 **المواضيع الرئيسية:** {', '.join(topics)}
-
-━━━━━━━━━━━━━━━━━━━━━━
-📊 **حقائق سريعة:**
-• عدد الكلمات: {len(text.split())}
-• عدد الجمل: {len(sentences)}
-• عدد الأحرف: {len(text)}
-
-✅ **تم التحليل بنجاح**
-"""
-    await update.message.reply_text(explanation)
-    return True
-
-# ========== الوظيفة الرئيسية لتوليد الصور ==========
-async def generate_image_from_text(prompt: str, update: Update):
-    """تجربة جميع بدائل الصور (8 بدائل)"""
-    
-    processing_msg = await update.message.reply_text(
-        f"🎨 **جاري توليد صورة...**\n\n"
-        f"📝 {prompt[:150]}\n\n"
-        f"🔄 أجرب 8 بدائل مجانية:"
-    )
-    
-    success = False
-    
-    # قائمة بجميع البدائل
-    image_apis = [
-        ("Pollinations", image_pollinations),
-        ("Lexica", image_lexica),
-        ("Craiyon", image_craiyon),
-        ("Playground", image_playground),
-        ("DeepAI", image_deepai),
-        ("Stability", image_stability),
-        ("Hugging Face", image_huggingface),
-        ("Clipdrop", image_clipdrop),
-    ]
-    
-    for i, (name, api_func) in enumerate(image_apis, 1):
-        if not success:
-            await processing_msg.edit_text(f"🖼 **البديل {i}/8:** {name}\n📝 {prompt[:80]}...")
-            success = await api_func(prompt, update)
-            await asyncio.sleep(0.5)
-    
-    await processing_msg.delete()
-    
-    if not success:
-        # الحل النهائي: رسم صورة بسيطة محلياً
-        await processing_msg.edit_text("🎨 **جاري رسم صورة بسيطة محلياً...**")
-        await create_simple_image_local(prompt, update)
-        await processing_msg.delete()
-    else:
-        await update.message.reply_text("✅ تم توليد الصورة بنجاح!")
-
-# رسم صورة بسيطة محلياً (الحل الأخير)
-async def create_simple_image_local(text: str, update: Update):
-    """رسم صورة بسيطة محلياً إذا فشلت جميع APIs"""
+# بديل احتياطي 3: رسم محلي
+async def image_local_fallback(prompt: str, update: Update):
     try:
         from PIL import Image, ImageDraw, ImageFont
         
@@ -427,28 +138,260 @@ async def create_simple_image_local(text: str, update: Update):
         except:
             font = ImageFont.load_default()
         
-        # كتابة النص على الصورة
-        lines = [text[i:i+35] for i in range(0, len(text), 35)]
+        lines = [prompt[i:i+35] for i in range(0, len(prompt), 35)]
         y = 50
         for line in lines[:5]:
             draw.text((50, y), line, fill=(255, 255, 255), font=font)
             y += 30
         
-        draw.text((50, y+20), "~ تم إنشاء هذه الصورة محلياً ~", fill=(200, 200, 200), font=font)
+        draw.text((50, y+20), "~ Pollinations غير متاح حالياً ~", fill=(200, 200, 200), font=font)
         
         img_buffer = io.BytesIO()
         img.save(img_buffer, format='PNG')
         img_buffer.seek(0)
-        img_buffer.name = "local_image.png"
+        img_buffer.name = "fallback_image.png"
         
         await update.message.reply_photo(
             photo=img_buffer,
-            caption=f"🖼 **صورة محلية (بديل احتياطي)**\n\n📝 {text[:150]}..."
+            caption=f"🖼 **صورة احتياطية (محلية)**\n\n📝 {prompt[:150]}...\n\n⚠️ Pollinations غير متاح حالياً، جرب مرة أخرى."
         )
         return True
     except:
-        await update.message.reply_text("❌ عذراً، جميع خدمات الصور غير متاحة. حاول لاحقاً.")
         return False
+
+# ========== شرح النص باستخدام مفاتيح API (DeepSeek ← Gemini ← OpenRouter) ==========
+
+async def call_deepseek(prompt: str, update: Update):
+    """استدعاء DeepSeek API"""
+    keys_list = key_states['deepseek']['keys']
+    current_idx = key_states['deepseek']['current_index']
+    failed_keys = key_states['deepseek']['failed_keys']
+    
+    for i in range(len(keys_list)):
+        idx = (current_idx + i) % len(keys_list)
+        if idx in failed_keys:
+            continue
+        
+        api_key = keys_list[idx]
+        try:
+            url = "https://api.deepseek.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            data = {
+                "model": "deepseek-chat",
+                "messages": [
+                    {"role": "system", "content": "أنت مساعد ذكي متخصص في تحليل وشرح النصوص. قم بتحليل النص التالي وشرحه بشكل مفصل."},
+                    {"role": "user", "content": f"قم بتحليل وشرح هذا النص بشكل مفصل:\n\n{prompt}"}
+                ],
+                "max_tokens": 2000
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=data, timeout=30) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        explanation = result['choices'][0]['message']['content']
+                        await update.message.reply_text(f"📚 **شرح DeepSeek AI**\n\n{explanation}")
+                        return True
+                    else:
+                        # هذا المفتاح فشل
+                        failed_keys.add(idx)
+                        logger.warning(f"DeepSeek key {idx+1} failed with status {resp.status}")
+                        continue
+        except Exception as e:
+            failed_keys.add(idx)
+            logger.error(f"DeepSeek key {idx+1} error: {e}")
+            continue
+    
+    return False
+
+async def call_gemini(prompt: str, update: Update):
+    """استدعاء Gemini API"""
+    keys_list = key_states['gemini']['keys']
+    current_idx = key_states['gemini']['current_index']
+    failed_keys = key_states['gemini']['failed_keys']
+    
+    for i in range(len(keys_list)):
+        idx = (current_idx + i) % len(keys_list)
+        if idx in failed_keys:
+            continue
+        
+        api_key = keys_list[idx]
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={api_key}"
+            headers = {"Content-Type": "application/json"}
+            data = {
+                "contents": [{
+                    "parts": [{"text": f"قم بتحليل وشرح هذا النص بشكل مفصل باللغة العربية:\n\n{prompt}"}]
+                }]
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=data, timeout=30) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        explanation = result['candidates'][0]['content']['parts'][0]['text']
+                        await update.message.reply_text(f"📚 **شرح Gemini AI**\n\n{explanation}")
+                        return True
+                    else:
+                        failed_keys.add(idx)
+                        continue
+        except Exception as e:
+            failed_keys.add(idx)
+            continue
+    
+    return False
+
+async def call_openrouter(prompt: str, update: Update):
+    """استدعاء OpenRouter API"""
+    keys_list = key_states['openrouter']['keys']
+    current_idx = key_states['openrouter']['current_index']
+    failed_keys = key_states['openrouter']['failed_keys']
+    
+    for i in range(len(keys_list)):
+        idx = (current_idx + i) % len(keys_list)
+        if idx in failed_keys:
+            continue
+        
+        api_key = keys_list[idx]
+        try:
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            data = {
+                "model": "openai/gpt-3.5-turbo",
+                "messages": [
+                    {"role": "system", "content": "أنت مساعد متخصص في تحليل النصوص."},
+                    {"role": "user", "content": f"حلل واشرح هذا النص:\n\n{prompt}"}
+                ]
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=data, timeout=30) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        explanation = result['choices'][0]['message']['content']
+                        await update.message.reply_text(f"📚 **شرح OpenRouter AI**\n\n{explanation}")
+                        return True
+                    else:
+                        failed_keys.add(idx)
+                        continue
+        except Exception as e:
+            failed_keys.add(idx)
+            continue
+    
+    return False
+
+# شرح النص المحلي (البديل النهائي)
+async def explain_local_fallback(text: str, update: Update):
+    """شرح محلي إذا فشلت جميع APIs"""
+    words = text.split()
+    sentences = re.split(r'[.!?؟]+', text)
+    sentences = [s for s in sentences if s.strip()]
+    
+    has_arabic = any('\u0600' <= c <= '\u06FF' for c in text)
+    
+    explanation = f"""
+📚 **شرح وتحليل النص (محلي - بديل احتياطي)**
+
+━━━━━━━━━━━━━━━━━━━━━━
+📝 **النص الأصلي:**
+{text[:400]}{'...' if len(text) > 400 else ''}
+
+━━━━━━━━━━━━━━━━━━━━━━
+📊 **الإحصائيات:**
+• عدد الحروف: {len(text)}
+• عدد الكلمات: {len(words)}
+• عدد الجمل: {len(sentences)}
+
+━━━━━━━━━━━━━━━━━━━━━━
+🌐 **اللغة:** {'عربية' if has_arabic else 'إنجليزية'}
+
+━━━━━━━━━━━━━━━━━━━━━━
+💡 **ملخص:**
+{text[:200]}{'...' if len(text) > 200 else ''}
+
+⚠️ جميع خدمات الشرح غير متاحة حالياً. هذا تحليل محلي بسيط.
+"""
+    await update.message.reply_text(explanation)
+    return True
+
+# الوظيفة الرئيسية لشرح النص
+async def explain_text_full(text: str, update: Update):
+    """شرح النص باستخدام المفاتيح بالترتيب"""
+    
+    processing_msg = await update.message.reply_text("📖 **جاري تحليل وشرح النص...**")
+    
+    success = False
+    
+    # الأولوية: DeepSeek
+    if DEEPSEEK_KEYS and not success:
+        await processing_msg.edit_text("📖 **جاري الاتصال بـ DeepSeek AI...**")
+        success = await call_deepseek(text, update)
+    
+    # الثاني: Gemini
+    if GEMINI_KEYS and not success:
+        await processing_msg.edit_text("📖 **جاري الاتصال بـ Gemini AI...**")
+        success = await call_gemini(text, update)
+    
+    # الثالث: OpenRouter
+    if OPENROUTER_KEYS and not success:
+        await processing_msg.edit_text("📖 **جاري الاتصال بـ OpenRouter AI...**")
+        success = await call_openrouter(text, update)
+    
+    # الأخير: شرح محلي
+    if not success:
+        await processing_msg.edit_text("📖 **جميع الخدمات غير متاحة، جاري التحليل المحلي...**")
+        success = await explain_local_fallback(text, update)
+    
+    await processing_msg.delete()
+    
+    if success:
+        await update.message.reply_text("✅ تم تحليل وشرح النص بنجاح!")
+
+# ========== الوظيفة الرئيسية لتوليد الصور ==========
+async def generate_image_from_text(prompt: str, update: Update):
+    """توليد صورة باستخدام Pollinations أولاً، ثم بدائل"""
+    
+    processing_msg = await update.message.reply_text(
+        f"🎨 **جاري توليد صورة...**\n\n"
+        f"📝 {prompt[:150]}\n\n"
+        f"🔄 **جاري الاتصال بـ Pollinations...**"
+    )
+    
+    success = False
+    
+    # الأولوية الأولى: Pollinations (الأفضل)
+    success = await image_pollinations(prompt, update)
+    
+    # إذا فشل Pollinations، جرب البدائل
+    if not success:
+        await processing_msg.edit_text("⚠️ **Pollinations غير متاح حالياً، أجرب بدائل احتياطية...**")
+        
+        # بديل 1: Craiyon
+        await processing_msg.edit_text("🖼 **البديل 1/3:** Craiyon...")
+        success = await image_craiyon(prompt, update)
+        
+        # بديل 2: Lexica
+        if not success:
+            await processing_msg.edit_text("🖼 **البديل 2/3:** Lexica...")
+            success = await image_lexica(prompt, update)
+        
+        # بديل 3: رسم محلي
+        if not success:
+            await processing_msg.edit_text("🖼 **البديل 3/3:** رسم محلي...")
+            success = await image_local_fallback(prompt, update)
+    
+    await processing_msg.delete()
+    
+    if success:
+        await update.message.reply_text("✅ تم توليد الصورة بنجاح!")
+    else:
+        await update.message.reply_text("❌ عذراً، جميع خدمات الصور غير متاحة. حاول مرة أخرى.")
 
 # ========== تحويل النص إلى صوت ==========
 async def google_tts(text: str, lang: str, gender: str, update: Update):
@@ -492,31 +435,6 @@ async def generate_audio(text: str, gender: str, update: Update):
     else:
         await update.message.reply_text("❌ عذراً، خدمة الصوت غير متاحة حالياً.")
 
-# ========== الوظيفة الرئيسية لشرح النص ==========
-async def explain_text_full(text: str, update: Update):
-    """شرح النص باستخدام جميع البدائل"""
-    
-    processing_msg = await update.message.reply_text("📖 **جاري تحليل وشرح النص...**")
-    
-    success = False
-    
-    # البديل 1: تحليل محلي (يعمل دائماً)
-    await processing_msg.edit_text("📖 **البديل 1/3:** تحليل محلي...")
-    success = await explain_local(text, update)
-    
-    if not success:
-        await processing_msg.edit_text("📖 **البديل 2/3:** تحليل API...")
-        success = await explain_api(text, update)
-    
-    if not success:
-        await processing_msg.edit_text("📖 **البديل 3/3:** تحليل ذكي...")
-        success = await explain_smart(text, update)
-    
-    await processing_msg.delete()
-    
-    if not success:
-        await update.message.reply_text("❌ عذراً، حدث خطأ في تحليل النص.")
-
 # ========== أوامر البوت ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -527,15 +445,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "✨ **مرحباً بك في البوت المتكامل!** ✨\n\n"
-        "🎨 **توليد صورة:** أي وصف تريده يتحول إلى صورة\n"
-        "   • 8 بدائل مجانية لتوليد الصور\n"
-        "   • يدعم العربية والإنجليزية\n\n"
-        "🎵 **تحويل نص إلى صوت:** يحول النص إلى MP3\n"
+        "🎨 **توليد صورة:**\n"
+        "   • الأولوية: Pollinations (أفضل خدمة مجانية)\n"
+        "   • بدائل احتياطية: Craiyon, Lexica, رسم محلي\n\n"
+        "🎵 **تحويل نص إلى صوت:**\n"
+        "   • تحويل أي نص إلى MP3\n"
         "   • اختيار ذكر أو أنثى\n\n"
-        "📖 **شرح النص:** يحلل النص ويعطيك شرحاً مفصلاً\n"
-        "   • عدد الكلمات والحروف\n"
-        "   • اللغة والمشاعر\n"
-        "   • الكلمات الأكثر تكراراً\n\n"
+        "📖 **شرح وتحليل النص:**\n"
+        "   • الأولوية: DeepSeek AI\n"
+        "   • الثاني: Gemini AI\n"
+        "   • الثالث: OpenRouter AI\n"
+        f"   • مفاتيح متاحة: DeepSeek({len(DEEPSEEK_KEYS)}), Gemini({len(GEMINI_KEYS)}), OpenRouter({len(OPENROUTER_KEYS)})\n\n"
         "🔽 **اختر ما تريد:**",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -568,7 +488,7 @@ async def action_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• قطة نائمة على كنبة\n"
             "• a boy playing in garden\n"
             "• cute cat sleeping\n\n"
-            "✅ سأجرب 8 بدائل مجانية"
+            "✅ الأولوية لـ Pollinations (أفضل خدمة مجانية)"
         )
         return WAITING_FOR_TEXT_IMAGE
         
@@ -576,11 +496,11 @@ async def action_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "📖 **شرح وتحليل النص**\n\n"
             "✏️ **أرسل النص لتحليله:**\n\n"
-            "✅ سأقوم بتحليل النص وإعطائك:\n"
-            "• عدد الحروف والكلمات والجمل\n"
-            "• اللغة والمشاعر\n"
-            "• الكلمات الأكثر تكراراً\n"
-            "• ملخص النص"
+            "✅ الأولوية: DeepSeek AI\n"
+            "✅ الثاني: Gemini AI\n"
+            "✅ الثالث: OpenRouter AI\n"
+            "✅ بديل احتياطي: تحليل محلي\n\n"
+            f"📊 المفاتيح المتاحة: DeepSeek({len(DEEPSEEK_KEYS)}), Gemini({len(GEMINI_KEYS)}), OpenRouter({len(OPENROUTER_KEYS)})"
         )
         return WAITING_FOR_EXPLAIN
         
@@ -682,7 +602,13 @@ def main():
     
     app.add_handler(conv_handler)
     
-    print("✅ البوت يعمل - 8 بدائل للصور + 3 بدائل لشرح النص")
+    print("=" * 50)
+    print("✅ البوت يعمل!")
+    print(f"📊 DeepSeek Keys: {len(DEEPSEEK_KEYS)}")
+    print(f"📊 Gemini Keys: {len(GEMINI_KEYS)}")
+    print(f"📊 OpenRouter Keys: {len(OPENROUTER_KEYS)}")
+    print("🎨 Pollinations: الأولوية الأولى للصور")
+    print("=" * 50)
     app.run_polling()
 
 if __name__ == "__main__":
