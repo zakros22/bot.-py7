@@ -19,26 +19,31 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("BOT_TOKEN")
 
 # ========== مفاتيح API من Heroku ==========
-# DeepSeek Keys
+# DeepSeek Keys (deepseek_key1 إلى deepseek_key9)
 DEEPSEEK_KEYS = []
-for i in range(1, 10):  # deepseek_key1 إلى deepseek_key9
+for i in range(1, 10):
     key = os.environ.get(f"DEEPSEEK_KEY{i}")
     if key:
         DEEPSEEK_KEYS.append(key)
 
-# Gemini Keys
+# Gemini Keys (gemini_key1 إلى gemini_key9)
 GEMINI_KEYS = []
-for i in range(1, 10):  # gemini_key1 إلى gemini_key9
+for i in range(1, 10):
     key = os.environ.get(f"GEMINI_KEY{i}")
     if key:
         GEMINI_KEYS.append(key)
 
-# OpenRouter Keys
+# OpenRouter Keys (openrouter_key1 إلى openrouter_key9)
 OPENROUTER_KEYS = []
-for i in range(1, 10):  # openrouter_key1 إلى openrouter_key9
+for i in range(1, 10):
     key = os.environ.get(f"OPENROUTER_KEY{i}")
     if key:
         OPENROUTER_KEYS.append(key)
+
+# إعدادات المحاولات
+MAX_RETRIES_POLLINATIONS = 10      # عدد محاولات Pollinations
+MAX_RETRIES_BACKUP_IMAGE = 3       # عدد محاولات كل بديل صور احتياطي
+MAX_RETRIES_API = 5                # عدد محاولات كل مفتاح API للشرح
 
 # حالات المحادثة
 CHOOSING_ACTION, CHOOSING_AUDIO_GENDER, WAITING_FOR_TEXT_AUDIO, WAITING_FOR_TEXT_IMAGE, WAITING_FOR_EXPLAIN = range(5)
@@ -46,89 +51,127 @@ CHOOSING_ACTION, CHOOSING_AUDIO_GENDER, WAITING_FOR_TEXT_AUDIO, WAITING_FOR_TEXT
 # تخزين بيانات المستخدمين
 user_choices = {}
 
-# تخزين حالة المفاتيح (أي مفتاح يستخدم حالياً)
+# تخزين حالة المفاتيح
 key_states = {
-    'deepseek': {'keys': DEEPSEEK_KEYS, 'current_index': 0, 'failed_keys': set()},
-    'gemini': {'keys': GEMINI_KEYS, 'current_index': 0, 'failed_keys': set()},
-    'openrouter': {'keys': OPENROUTER_KEYS, 'current_index': 0, 'failed_keys': set()}
+    'deepseek': {'keys': DEEPSEEK_KEYS, 'current_index': 0, 'failed_keys': set(), 'retry_count': 0},
+    'gemini': {'keys': GEMINI_KEYS, 'current_index': 0, 'failed_keys': set(), 'retry_count': 0},
+    'openrouter': {'keys': OPENROUTER_KEYS, 'current_index': 0, 'failed_keys': set(), 'retry_count': 0}
 }
 
-# ========== بدائل توليد الصور (Pollinations أولاً) ==========
-
-# البديل 1: Pollinations (الأفضل - أولوية أولى)
-async def image_pollinations(prompt: str, update: Update):
-    """توليد صورة باستخدام Pollinations - يعمل دائماً"""
-    try:
-        clean_prompt = prompt.strip().replace(" ", "%20")
-        encoded_prompt = urllib.parse.quote(f"{clean_prompt}, cartoon style, colorful, high quality")
-        # إضافة seed عشوائي للحصول على صور مختلفة
-        random_seed = random.randint(1, 100000)
-        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=512&height=512&nologo=true&seed={random_seed}"
+# ========== وظيفة المحاولة مع إعادة التجربة ==========
+async def retry_request(func, *args, max_retries=3, delay=1, **kwargs):
+    """تنفيذ طلب مع إعادة المحاولة تلقائياً"""
+    for attempt in range(max_retries):
+        try:
+            result = await func(*args, **kwargs)
+            if result:
+                return True
+        except Exception as e:
+            logger.warning(f"محاولة {attempt + 1}/{max_retries} فشلت: {e}")
         
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=30) as response:
-            image_data = response.read()
+        if attempt < max_retries - 1:
+            await asyncio.sleep(delay * (attempt + 1))  # تأخير متزايد
+    return False
+
+# ========== توليد الصور باستخدام Pollinations (مع 10 محاولات) ==========
+async def image_pollinations_with_retry(prompt: str, update: Update, processing_msg):
+    """Pollinations مع 10 محاولات"""
+    
+    for attempt in range(MAX_RETRIES_POLLINATIONS):
+        await processing_msg.edit_text(
+            f"🎨 **Pollinations - المحاولة {attempt + 1}/{MAX_RETRIES_POLLINATIONS}**\n\n"
+            f"📝 {prompt[:100]}...\n\n"
+            f"🔄 جاري التوليد..."
+        )
         
-        if len(image_data) > 1000:
-            image_file = io.BytesIO(image_data)
-            image_file.name = "pollinations.png"
-            await update.message.reply_photo(
-                photo=image_file, 
-                caption=f"🎨 **صورة من Pollinations AI**\n\n📝 **الوصف:** {prompt[:150]}...\n\n✅ تم التوليد بنجاح!"
-            )
-            return True
-        return False
-    except Exception as e:
-        logger.error(f"Pollinations error: {e}")
-        return False
+        try:
+            clean_prompt = prompt.strip().replace(" ", "%20")
+            encoded_prompt = urllib.parse.quote(f"{clean_prompt}, cartoon style, colorful, high quality")
+            random_seed = random.randint(1, 1000000)
+            url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=512&height=512&nologo=true&seed={random_seed}"
+            
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=30) as response:
+                image_data = response.read()
+            
+            if len(image_data) > 1000:
+                image_file = io.BytesIO(image_data)
+                image_file.name = "pollinations.png"
+                await update.message.reply_photo(
+                    photo=image_file,
+                    caption=f"🎨 **صورة من Pollinations AI**\n\n📝 **الوصف:** {prompt[:150]}...\n\n✅ تم التوليد بنجاح بعد {attempt + 1} محاولة!"
+                )
+                return True
+                
+        except Exception as e:
+            logger.error(f"Pollinations محاولة {attempt + 1} فشلت: {e}")
+            if attempt < MAX_RETRIES_POLLINATIONS - 1:
+                await asyncio.sleep(2)  # انتظار قبل المحاولة التالية
+            continue
+    
+    return False
 
-# بديل احتياطي 1: Craiyon
-async def image_craiyon(prompt: str, update: Update):
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post("https://backend.craiyon.com/generate", json={"prompt": f"cartoon, {prompt}"}, timeout=25) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    images = data.get('images', [])
-                    if images and len(images) > 0:
-                        image_data = base64.b64decode(images[0])
-                        image_file = io.BytesIO(image_data)
-                        image_file.name = "craiyon.png"
-                        await update.message.reply_photo(photo=image_file, caption=f"🎨 صورة من Craiyon (بديل)\n📝 {prompt[:100]}")
-                        return True
-        return False
-    except:
-        return False
+# ========== بدائل الصور الاحتياطية (مع 3 محاولات لكل بديل) ==========
 
-# بديل احتياطي 2: Lexica
-async def image_lexica(prompt: str, update: Update):
-    try:
-        encoded_prompt = urllib.parse.quote(prompt)
-        url = f"https://lexica.art/api/v1/search?q={encoded_prompt}"
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=15) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    images = data.get('images', [])
-                    if images and len(images) > 0:
-                        image_url = images[0].get('src')
-                        if image_url:
-                            async with session.get(image_url) as img_resp:
-                                image_data = await img_resp.read()
-                                if len(image_data) > 1000:
-                                    image_file = io.BytesIO(image_data)
-                                    image_file.name = "lexica.png"
-                                    await update.message.reply_photo(photo=image_file, caption=f"🎨 صورة من Lexica (بديل)\n📝 {prompt[:100]}")
-                                    return True
-        return False
-    except:
-        return False
+async def image_craiyon_with_retry(prompt: str, update: Update, processing_msg):
+    """Craiyon مع 3 محاولات"""
+    for attempt in range(MAX_RETRIES_BACKUP_IMAGE):
+        await processing_msg.edit_text(f"🖼 **Craiyon - المحاولة {attempt + 1}/{MAX_RETRIES_BACKUP_IMAGE}**")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post("https://backend.craiyon.com/generate", json={"prompt": f"cartoon, {prompt}"}, timeout=25) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        images = data.get('images', [])
+                        if images and len(images) > 0:
+                            image_data = base64.b64decode(images[0])
+                            image_file = io.BytesIO(image_data)
+                            image_file.name = "craiyon.png"
+                            await update.message.reply_photo(photo=image_file, caption=f"🎨 صورة من Craiyon (بديل)\n📝 {prompt[:100]}")
+                            return True
+        except Exception as e:
+            logger.error(f"Craiyon محاولة {attempt + 1} فشلت: {e}")
+            if attempt < MAX_RETRIES_BACKUP_IMAGE - 1:
+                await asyncio.sleep(1)
+            continue
+    return False
 
-# بديل احتياطي 3: رسم محلي
-async def image_local_fallback(prompt: str, update: Update):
+async def image_lexica_with_retry(prompt: str, update: Update, processing_msg):
+    """Lexica مع 3 محاولات"""
+    for attempt in range(MAX_RETRIES_BACKUP_IMAGE):
+        await processing_msg.edit_text(f"🖼 **Lexica - المحاولة {attempt + 1}/{MAX_RETRIES_BACKUP_IMAGE}**")
+        try:
+            encoded_prompt = urllib.parse.quote(prompt)
+            url = f"https://lexica.art/api/v1/search?q={encoded_prompt}"
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=15) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        images = data.get('images', [])
+                        if images and len(images) > 0:
+                            image_url = images[0].get('src')
+                            if image_url:
+                                async with session.get(image_url) as img_resp:
+                                    image_data = await img_resp.read()
+                                    if len(image_data) > 1000:
+                                        image_file = io.BytesIO(image_data)
+                                        image_file.name = "lexica.png"
+                                        await update.message.reply_photo(photo=image_file, caption=f"🎨 صورة من Lexica (بديل)\n📝 {prompt[:100]}")
+                                        return True
+        except Exception as e:
+            logger.error(f"Lexica محاولة {attempt + 1} فشلت: {e}")
+            if attempt < MAX_RETRIES_BACKUP_IMAGE - 1:
+                await asyncio.sleep(1)
+            continue
+    return False
+
+async def image_local_fallback(prompt: str, update: Update, processing_msg):
+    """رسم محلي (الحل الأخير)"""
     try:
         from PIL import Image, ImageDraw, ImageFont
+        
+        await processing_msg.edit_text("🎨 **جاري رسم صورة محلية...**")
         
         img = Image.new('RGB', (600, 400), color=(50, 50, 150))
         draw = ImageDraw.Draw(img)
@@ -144,7 +187,7 @@ async def image_local_fallback(prompt: str, update: Update):
             draw.text((50, y), line, fill=(255, 255, 255), font=font)
             y += 30
         
-        draw.text((50, y+20), "~ Pollinations غير متاح حالياً ~", fill=(200, 200, 200), font=font)
+        draw.text((50, y+20), "~ تم إنشاء هذه الصورة محلياً ~", fill=(200, 200, 200), font=font)
         
         img_buffer = io.BytesIO()
         img.save(img_buffer, format='PNG')
@@ -153,142 +196,191 @@ async def image_local_fallback(prompt: str, update: Update):
         
         await update.message.reply_photo(
             photo=img_buffer,
-            caption=f"🖼 **صورة احتياطية (محلية)**\n\n📝 {prompt[:150]}...\n\n⚠️ Pollinations غير متاح حالياً، جرب مرة أخرى."
+            caption=f"🖼 **صورة احتياطية (محلية)**\n\n📝 {prompt[:150]}...\n\n⚠️ جميع خدمات الصور غير متاحة حالياً."
         )
         return True
-    except:
+    except Exception as e:
+        logger.error(f"Local fallback error: {e}")
         return False
 
-# ========== شرح النص باستخدام مفاتيح API (DeepSeek ← Gemini ← OpenRouter) ==========
+# ========== وظيفة توليد الصور الرئيسية ==========
+async def generate_image_from_text(prompt: str, update: Update):
+    """توليد صورة مع 10 محاولات لـ Pollinations أولاً"""
+    
+    processing_msg = await update.message.reply_text(
+        f"🎨 **جاري توليد صورة...**\n\n"
+        f"📝 {prompt[:150]}\n\n"
+        f"🔄 **سيتم المحاولة {MAX_RETRIES_POLLINATIONS} مرة على Pollinations**"
+    )
+    
+    success = False
+    
+    # الأولوية: Pollinations (10 محاولات)
+    success = await image_pollinations_with_retry(prompt, update, processing_msg)
+    
+    # إذا فشل Pollinations، جرب البدائل الاحتياطية
+    if not success:
+        await processing_msg.edit_text("⚠️ **Pollinations غير متاح بعد 10 محاولات، أجرب بدائل احتياطية...**")
+        
+        # بديل 1: Craiyon (3 محاولات)
+        success = await image_craiyon_with_retry(prompt, update, processing_msg)
+        
+        # بديل 2: Lexica (3 محاولات)
+        if not success:
+            success = await image_lexica_with_retry(prompt, update, processing_msg)
+        
+        # بديل 3: رسم محلي
+        if not success:
+            success = await image_local_fallback(prompt, update, processing_msg)
+    
+    await processing_msg.delete()
+    
+    if not success:
+        await update.message.reply_text("❌ عذراً، جميع خدمات الصور غير متاحة. حاول مرة أخرى لاحقاً.")
 
-async def call_deepseek(prompt: str, update: Update):
-    """استدعاء DeepSeek API"""
+# ========== شرح النص باستخدام DeepSeek (مع 5 محاولات لكل مفتاح) ==========
+
+async def call_deepseek_with_retry(prompt: str, update: Update, processing_msg):
+    """DeepSeek مع 5 محاولات لكل مفتاح"""
     keys_list = key_states['deepseek']['keys']
-    current_idx = key_states['deepseek']['current_index']
-    failed_keys = key_states['deepseek']['failed_keys']
     
-    for i in range(len(keys_list)):
-        idx = (current_idx + i) % len(keys_list)
-        if idx in failed_keys:
+    for key_idx, api_key in enumerate(keys_list):
+        if key_idx in key_states['deepseek']['failed_keys']:
             continue
         
-        api_key = keys_list[idx]
-        try:
-            url = "https://api.deepseek.com/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-            data = {
-                "model": "deepseek-chat",
-                "messages": [
-                    {"role": "system", "content": "أنت مساعد ذكي متخصص في تحليل وشرح النصوص. قم بتحليل النص التالي وشرحه بشكل مفصل."},
-                    {"role": "user", "content": f"قم بتحليل وشرح هذا النص بشكل مفصل:\n\n{prompt}"}
-                ],
-                "max_tokens": 2000
-            }
+        for attempt in range(MAX_RETRIES_API):
+            await processing_msg.edit_text(
+                f"📖 **DeepSeek - المفتاح {key_idx + 1}/{len(keys_list)} - المحاولة {attempt + 1}/{MAX_RETRIES_API}**"
+            )
             
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=data, timeout=30) as resp:
-                    if resp.status == 200:
-                        result = await resp.json()
-                        explanation = result['choices'][0]['message']['content']
-                        await update.message.reply_text(f"📚 **شرح DeepSeek AI**\n\n{explanation}")
-                        return True
-                    else:
-                        # هذا المفتاح فشل
-                        failed_keys.add(idx)
-                        logger.warning(f"DeepSeek key {idx+1} failed with status {resp.status}")
-                        continue
-        except Exception as e:
-            failed_keys.add(idx)
-            logger.error(f"DeepSeek key {idx+1} error: {e}")
-            continue
+            try:
+                url = "https://api.deepseek.com/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                }
+                data = {
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {"role": "system", "content": "أنت مساعد ذكي متخصص في تحليل وشرح النصوص. قم بتحليل النص التالي وشرحه بشكل مفصل باللغة العربية."},
+                        {"role": "user", "content": f"قم بتحليل وشرح هذا النص بشكل مفصل:\n\n{prompt}"}
+                    ],
+                    "max_tokens": 2000
+                }
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, headers=headers, json=data, timeout=30) as resp:
+                        if resp.status == 200:
+                            result = await resp.json()
+                            explanation = result['choices'][0]['message']['content']
+                            await update.message.reply_text(f"📚 **شرح DeepSeek AI**\n\n{explanation}")
+                            return True
+                        else:
+                            logger.warning(f"DeepSeek key {key_idx + 1} attempt {attempt + 1} failed with status {resp.status}")
+                            
+            except Exception as e:
+                logger.error(f"DeepSeek key {key_idx + 1} attempt {attempt + 1} error: {e}")
+            
+            if attempt < MAX_RETRIES_API - 1:
+                await asyncio.sleep(2)  # انتظار بين المحاولات
+        
+        # إذا فشلت كل محاولات هذا المفتاح، ضعه في قائمة الفاشلة
+        key_states['deepseek']['failed_keys'].add(key_idx)
+        logger.warning(f"DeepSeek key {key_idx + 1} failed after {MAX_RETRIES_API} attempts")
     
     return False
 
-async def call_gemini(prompt: str, update: Update):
-    """استدعاء Gemini API"""
+async def call_gemini_with_retry(prompt: str, update: Update, processing_msg):
+    """Gemini مع 5 محاولات لكل مفتاح"""
     keys_list = key_states['gemini']['keys']
-    current_idx = key_states['gemini']['current_index']
-    failed_keys = key_states['gemini']['failed_keys']
     
-    for i in range(len(keys_list)):
-        idx = (current_idx + i) % len(keys_list)
-        if idx in failed_keys:
+    for key_idx, api_key in enumerate(keys_list):
+        if key_idx in key_states['gemini']['failed_keys']:
             continue
         
-        api_key = keys_list[idx]
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={api_key}"
-            headers = {"Content-Type": "application/json"}
-            data = {
-                "contents": [{
-                    "parts": [{"text": f"قم بتحليل وشرح هذا النص بشكل مفصل باللغة العربية:\n\n{prompt}"}]
-                }]
-            }
+        for attempt in range(MAX_RETRIES_API):
+            await processing_msg.edit_text(
+                f"📖 **Gemini - المفتاح {key_idx + 1}/{len(keys_list)} - المحاولة {attempt + 1}/{MAX_RETRIES_API}**"
+            )
             
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=data, timeout=30) as resp:
-                    if resp.status == 200:
-                        result = await resp.json()
-                        explanation = result['candidates'][0]['content']['parts'][0]['text']
-                        await update.message.reply_text(f"📚 **شرح Gemini AI**\n\n{explanation}")
-                        return True
-                    else:
-                        failed_keys.add(idx)
-                        continue
-        except Exception as e:
-            failed_keys.add(idx)
-            continue
+            try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={api_key}"
+                headers = {"Content-Type": "application/json"}
+                data = {
+                    "contents": [{
+                        "parts": [{"text": f"قم بتحليل وشرح هذا النص بشكل مفصل باللغة العربية:\n\n{prompt}"}]
+                    }]
+                }
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, headers=headers, json=data, timeout=30) as resp:
+                        if resp.status == 200:
+                            result = await resp.json()
+                            explanation = result['candidates'][0]['content']['parts'][0]['text']
+                            await update.message.reply_text(f"📚 **شرح Gemini AI**\n\n{explanation}")
+                            return True
+                        else:
+                            logger.warning(f"Gemini key {key_idx + 1} attempt {attempt + 1} failed")
+                            
+            except Exception as e:
+                logger.error(f"Gemini key {key_idx + 1} attempt {attempt + 1} error: {e}")
+            
+            if attempt < MAX_RETRIES_API - 1:
+                await asyncio.sleep(2)
+        
+        key_states['gemini']['failed_keys'].add(key_idx)
     
     return False
 
-async def call_openrouter(prompt: str, update: Update):
-    """استدعاء OpenRouter API"""
+async def call_openrouter_with_retry(prompt: str, update: Update, processing_msg):
+    """OpenRouter مع 5 محاولات لكل مفتاح"""
     keys_list = key_states['openrouter']['keys']
-    current_idx = key_states['openrouter']['current_index']
-    failed_keys = key_states['openrouter']['failed_keys']
     
-    for i in range(len(keys_list)):
-        idx = (current_idx + i) % len(keys_list)
-        if idx in failed_keys:
+    for key_idx, api_key in enumerate(keys_list):
+        if key_idx in key_states['openrouter']['failed_keys']:
             continue
         
-        api_key = keys_list[idx]
-        try:
-            url = "https://openrouter.ai/api/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-            data = {
-                "model": "openai/gpt-3.5-turbo",
-                "messages": [
-                    {"role": "system", "content": "أنت مساعد متخصص في تحليل النصوص."},
-                    {"role": "user", "content": f"حلل واشرح هذا النص:\n\n{prompt}"}
-                ]
-            }
+        for attempt in range(MAX_RETRIES_API):
+            await processing_msg.edit_text(
+                f"📖 **OpenRouter - المفتاح {key_idx + 1}/{len(keys_list)} - المحاولة {attempt + 1}/{MAX_RETRIES_API}**"
+            )
             
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=data, timeout=30) as resp:
-                    if resp.status == 200:
-                        result = await resp.json()
-                        explanation = result['choices'][0]['message']['content']
-                        await update.message.reply_text(f"📚 **شرح OpenRouter AI**\n\n{explanation}")
-                        return True
-                    else:
-                        failed_keys.add(idx)
-                        continue
-        except Exception as e:
-            failed_keys.add(idx)
-            continue
+            try:
+                url = "https://openrouter.ai/api/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                }
+                data = {
+                    "model": "openai/gpt-3.5-turbo",
+                    "messages": [
+                        {"role": "system", "content": "أنت مساعد متخصص في تحليل النصوص."},
+                        {"role": "user", "content": f"حلل واشرح هذا النص باللغة العربية:\n\n{prompt}"}
+                    ]
+                }
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, headers=headers, json=data, timeout=30) as resp:
+                        if resp.status == 200:
+                            result = await resp.json()
+                            explanation = result['choices'][0]['message']['content']
+                            await update.message.reply_text(f"📚 **شرح OpenRouter AI**\n\n{explanation}")
+                            return True
+                        else:
+                            logger.warning(f"OpenRouter key {key_idx + 1} attempt {attempt + 1} failed")
+                            
+            except Exception as e:
+                logger.error(f"OpenRouter key {key_idx + 1} attempt {attempt + 1} error: {e}")
+            
+            if attempt < MAX_RETRIES_API - 1:
+                await asyncio.sleep(2)
+        
+        key_states['openrouter']['failed_keys'].add(key_idx)
     
     return False
 
-# شرح النص المحلي (البديل النهائي)
+# شرح محلي (البديل النهائي)
 async def explain_local_fallback(text: str, update: Update):
-    """شرح محلي إذا فشلت جميع APIs"""
     words = text.split()
     sentences = re.split(r'[.!?؟]+', text)
     sentences = [s for s in sentences if s.strip()]
@@ -322,26 +414,23 @@ async def explain_local_fallback(text: str, update: Update):
 
 # الوظيفة الرئيسية لشرح النص
 async def explain_text_full(text: str, update: Update):
-    """شرح النص باستخدام المفاتيح بالترتيب"""
+    """شرح النص مع 5 محاولات لكل مفتاح"""
     
     processing_msg = await update.message.reply_text("📖 **جاري تحليل وشرح النص...**")
     
     success = False
     
-    # الأولوية: DeepSeek
+    # الأولوية: DeepSeek (5 محاولات لكل مفتاح)
     if DEEPSEEK_KEYS and not success:
-        await processing_msg.edit_text("📖 **جاري الاتصال بـ DeepSeek AI...**")
-        success = await call_deepseek(text, update)
+        success = await call_deepseek_with_retry(text, update, processing_msg)
     
-    # الثاني: Gemini
+    # الثاني: Gemini (5 محاولات لكل مفتاح)
     if GEMINI_KEYS and not success:
-        await processing_msg.edit_text("📖 **جاري الاتصال بـ Gemini AI...**")
-        success = await call_gemini(text, update)
+        success = await call_gemini_with_retry(text, update, processing_msg)
     
-    # الثالث: OpenRouter
+    # الثالث: OpenRouter (5 محاولات لكل مفتاح)
     if OPENROUTER_KEYS and not success:
-        await processing_msg.edit_text("📖 **جاري الاتصال بـ OpenRouter AI...**")
-        success = await call_openrouter(text, update)
+        success = await call_openrouter_with_retry(text, update, processing_msg)
     
     # الأخير: شرح محلي
     if not success:
@@ -353,87 +442,53 @@ async def explain_text_full(text: str, update: Update):
     if success:
         await update.message.reply_text("✅ تم تحليل وشرح النص بنجاح!")
 
-# ========== الوظيفة الرئيسية لتوليد الصور ==========
-async def generate_image_from_text(prompt: str, update: Update):
-    """توليد صورة باستخدام Pollinations أولاً، ثم بدائل"""
-    
-    processing_msg = await update.message.reply_text(
-        f"🎨 **جاري توليد صورة...**\n\n"
-        f"📝 {prompt[:150]}\n\n"
-        f"🔄 **جاري الاتصال بـ Pollinations...**"
-    )
-    
-    success = False
-    
-    # الأولوية الأولى: Pollinations (الأفضل)
-    success = await image_pollinations(prompt, update)
-    
-    # إذا فشل Pollinations، جرب البدائل
-    if not success:
-        await processing_msg.edit_text("⚠️ **Pollinations غير متاح حالياً، أجرب بدائل احتياطية...**")
-        
-        # بديل 1: Craiyon
-        await processing_msg.edit_text("🖼 **البديل 1/3:** Craiyon...")
-        success = await image_craiyon(prompt, update)
-        
-        # بديل 2: Lexica
-        if not success:
-            await processing_msg.edit_text("🖼 **البديل 2/3:** Lexica...")
-            success = await image_lexica(prompt, update)
-        
-        # بديل 3: رسم محلي
-        if not success:
-            await processing_msg.edit_text("🖼 **البديل 3/3:** رسم محلي...")
-            success = await image_local_fallback(prompt, update)
-    
-    await processing_msg.delete()
-    
-    if success:
-        await update.message.reply_text("✅ تم توليد الصورة بنجاح!")
-    else:
-        await update.message.reply_text("❌ عذراً، جميع خدمات الصور غير متاحة. حاول مرة أخرى.")
-
-# ========== تحويل النص إلى صوت ==========
-async def google_tts(text: str, lang: str, gender: str, update: Update):
-    try:
-        lang_codes = {'ar': 'ar', 'en': 'en'}
-        lang_code = lang_codes.get(lang, 'ar')
-        
-        text_encoded = urllib.parse.quote(text[:300])
-        url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={text_encoded}&tl={lang_code}&client=tw-ob"
-        
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=15) as response:
-            audio_data = response.read()
-        
-        if len(audio_data) > 2000:
-            audio_file = io.BytesIO(audio_data)
-            audio_file.name = "google_tts.mp3"
-            await update.message.reply_audio(
-                audio=audio_file,
-                title="Google TTS",
-                performer=f"{'ذكر' if gender=='male' else 'أنثى'}",
-                caption="✅ تم تحويل النص إلى صوت"
-            )
-            return True
-        return False
-    except:
-        return False
+# ========== تحويل النص إلى صوت (مع 3 محاولات) ==========
+async def google_tts_with_retry(text: str, lang: str, gender: str, update: Update, processing_msg):
+    """Google TTS مع 3 محاولات"""
+    for attempt in range(3):
+        await processing_msg.edit_text(f"🎙 **تحويل الصوت - المحاولة {attempt + 1}/3**")
+        try:
+            lang_codes = {'ar': 'ar', 'en': 'en'}
+            lang_code = lang_codes.get(lang, 'ar')
+            
+            text_encoded = urllib.parse.quote(text[:300])
+            url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={text_encoded}&tl={lang_code}&client=tw-ob"
+            
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=15) as response:
+                audio_data = response.read()
+            
+            if len(audio_data) > 2000:
+                audio_file = io.BytesIO(audio_data)
+                audio_file.name = "google_tts.mp3"
+                await update.message.reply_audio(
+                    audio=audio_file,
+                    title="Google TTS",
+                    performer=f"{'ذكر' if gender=='male' else 'أنثى'}",
+                    caption="✅ تم تحويل النص إلى صوت"
+                )
+                return True
+        except Exception as e:
+            logger.error(f"TTS attempt {attempt + 1} failed: {e}")
+            if attempt < 2:
+                await asyncio.sleep(1)
+            continue
+    return False
 
 async def generate_audio(text: str, gender: str, update: Update):
     has_arabic = any('\u0600' <= c <= '\u06FF' for c in text)
     lang = 'ar' if has_arabic else 'en'
     
-    processing_msg = await update.message.reply_text(f"🎙 **جاري تحويل النص إلى صوت...**")
+    processing_msg = await update.message.reply_text(f"🎙 **جاري تحويل النص إلى صوت (3 محاولات)...**")
     
-    success = await google_tts(text, lang, gender, update)
+    success = await google_tts_with_retry(text, lang, gender, update, processing_msg)
     
     await processing_msg.delete()
     
     if success:
         await update.message.reply_text("✅ تم تحويل النص إلى صوت بنجاح!")
     else:
-        await update.message.reply_text("❌ عذراً، خدمة الصوت غير متاحة حالياً.")
+        await update.message.reply_text("❌ عذراً، خدمة الصوت غير متاحة حالياً. حاول مرة أخرى.")
 
 # ========== أوامر البوت ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -444,19 +499,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     
     await update.message.reply_text(
-        "✨ **مرحباً بك في البوت المتكامل!** ✨\n\n"
-        "🎨 **توليد صورة:**\n"
-        "   • الأولوية: Pollinations (أفضل خدمة مجانية)\n"
-        "   • بدائل احتياطية: Craiyon, Lexica, رسم محلي\n\n"
-        "🎵 **تحويل نص إلى صوت:**\n"
-        "   • تحويل أي نص إلى MP3\n"
-        "   • اختيار ذكر أو أنثى\n\n"
-        "📖 **شرح وتحليل النص:**\n"
-        "   • الأولوية: DeepSeek AI\n"
-        "   • الثاني: Gemini AI\n"
-        "   • الثالث: OpenRouter AI\n"
+        f"✨ **مرحباً بك في البوت المتكامل!** ✨\n\n"
+        f"🎨 **توليد صورة:**\n"
+        f"   • Pollinations: {MAX_RETRIES_POLLINATIONS} محاولة\n"
+        f"   • بدائل احتياطية: {MAX_RETRIES_BACKUP_IMAGE} محاولات لكل بديل\n\n"
+        f"🎵 **تحويل نص إلى صوت:** 3 محاولات\n\n"
+        f"📖 **شرح وتحليل النص:**\n"
+        f"   • DeepSeek: {MAX_RETRIES_API} محاولات لكل مفتاح\n"
+        f"   • Gemini: {MAX_RETRIES_API} محاولات لكل مفتاح\n"
+        f"   • OpenRouter: {MAX_RETRIES_API} محاولات لكل مفتاح\n"
         f"   • مفاتيح متاحة: DeepSeek({len(DEEPSEEK_KEYS)}), Gemini({len(GEMINI_KEYS)}), OpenRouter({len(OPENROUTER_KEYS)})\n\n"
-        "🔽 **اختر ما تريد:**",
+        f"🔽 **اختر ما تريد:**",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return CHOOSING_ACTION
@@ -473,22 +526,15 @@ async def action_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("👩 أنثى", callback_data="audio_female")],
             [InlineKeyboardButton("🔙 رجوع", callback_data="back_to_start")]
         ]
-        await query.edit_message_text(
-            "🎤 **اختر نوع الصوت:**",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_text("🎤 **اختر نوع الصوت:**", reply_markup=InlineKeyboardMarkup(keyboard))
         return CHOOSING_AUDIO_GENDER
         
     elif action == "action_image":
         await query.edit_message_text(
             "🎨 **توليد صورة من النص**\n\n"
             "✏️ **أرسل وصف الصورة:**\n\n"
-            "📝 أمثلة:\n"
-            "• ولد في حديقة مع زهور\n"
-            "• قطة نائمة على كنبة\n"
-            "• a boy playing in garden\n"
-            "• cute cat sleeping\n\n"
-            "✅ الأولوية لـ Pollinations (أفضل خدمة مجانية)"
+            f"✅ الأولوية لـ Pollinations ({MAX_RETRIES_POLLINATIONS} محاولة)\n"
+            f"✅ ثم بدائل احتياطية ({MAX_RETRIES_BACKUP_IMAGE} محاولات لكل بديل)"
         )
         return WAITING_FOR_TEXT_IMAGE
         
@@ -496,11 +542,10 @@ async def action_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "📖 **شرح وتحليل النص**\n\n"
             "✏️ **أرسل النص لتحليله:**\n\n"
-            "✅ الأولوية: DeepSeek AI\n"
-            "✅ الثاني: Gemini AI\n"
-            "✅ الثالث: OpenRouter AI\n"
-            "✅ بديل احتياطي: تحليل محلي\n\n"
-            f"📊 المفاتيح المتاحة: DeepSeek({len(DEEPSEEK_KEYS)}), Gemini({len(GEMINI_KEYS)}), OpenRouter({len(OPENROUTER_KEYS)})"
+            f"✅ DeepSeek: {MAX_RETRIES_API} محاولات لكل مفتاح\n"
+            f"✅ Gemini: {MAX_RETRIES_API} محاولات لكل مفتاح\n"
+            f"✅ OpenRouter: {MAX_RETRIES_API} محاولات لكل مفتاح\n"
+            f"📊 المفاتيح: DeepSeek({len(DEEPSEEK_KEYS)}), Gemini({len(GEMINI_KEYS)}), OpenRouter({len(OPENROUTER_KEYS)})"
         )
         return WAITING_FOR_EXPLAIN
         
@@ -520,10 +565,7 @@ async def audio_gender_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
     gender = 'male' if choice == "audio_male" else 'female'
     user_choices[user_id] = {'type': 'audio', 'gender': gender}
     
-    await query.edit_message_text(
-        f"🎤 **تم اختيار {'ذكر' if gender=='male' else 'أنثى'}**\n\n"
-        "✏️ **أرسل النص الذي تريد تحويله إلى صوت:**"
-    )
+    await query.edit_message_text(f"🎤 **تم اختيار {'ذكر' if gender=='male' else 'أنثى'}**\n\n✏️ **أرسل النص:**")
     return WAITING_FOR_TEXT_AUDIO
 
 async def receive_audio_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -544,10 +586,7 @@ async def receive_audio_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("🎵 تحويل صوت", callback_data="action_audio")],
         [InlineKeyboardButton("📖 شرح نص", callback_data="action_explain")],
     ]
-    await update.message.reply_text(
-        "✨ **هل تريد صناعة شيء آخر؟**",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await update.message.reply_text("✨ **هل تريد صناعة شيء آخر؟**", reply_markup=InlineKeyboardMarkup(keyboard))
     return CHOOSING_ACTION
 
 async def receive_image_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -559,10 +598,7 @@ async def receive_image_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("🎵 تحويل صوت", callback_data="action_audio")],
         [InlineKeyboardButton("📖 شرح نص", callback_data="action_explain")],
     ]
-    await update.message.reply_text(
-        "✨ **هل تريد صناعة شيء آخر؟**",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await update.message.reply_text("✨ **هل تريد صناعة شيء آخر؟**", reply_markup=InlineKeyboardMarkup(keyboard))
     return CHOOSING_ACTION
 
 async def receive_explain_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -574,10 +610,7 @@ async def receive_explain_text(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton("🎵 تحويل صوت", callback_data="action_audio")],
         [InlineKeyboardButton("📖 شرح نص", callback_data="action_explain")],
     ]
-    await update.message.reply_text(
-        "✨ **هل تريد تحليل نص آخر؟**",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await update.message.reply_text("✨ **هل تريد تحليل نص آخر؟**", reply_markup=InlineKeyboardMarkup(keyboard))
     return CHOOSING_ACTION
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -602,13 +635,14 @@ def main():
     
     app.add_handler(conv_handler)
     
-    print("=" * 50)
-    print("✅ البوت يعمل!")
-    print(f"📊 DeepSeek Keys: {len(DEEPSEEK_KEYS)}")
-    print(f"📊 Gemini Keys: {len(GEMINI_KEYS)}")
-    print(f"📊 OpenRouter Keys: {len(OPENROUTER_KEYS)}")
-    print("🎨 Pollinations: الأولوية الأولى للصور")
-    print("=" * 50)
+    print("=" * 60)
+    print("✅ البوت يعمل مع نظام المحاولات!")
+    print(f"📊 Pollinations: {MAX_RETRIES_POLLINATIONS} محاولة")
+    print(f"📊 البدائل الاحتياطية: {MAX_RETRIES_BACKUP_IMAGE} محاولات لكل بديل")
+    print(f"📊 DeepSeek Keys: {len(DEEPSEEK_KEYS)} (كل مفتاح {MAX_RETRIES_API} محاولات)")
+    print(f"📊 Gemini Keys: {len(GEMINI_KEYS)} (كل مفتاح {MAX_RETRIES_API} محاولات)")
+    print(f"📊 OpenRouter Keys: {len(OPENROUTER_KEYS)} (كل مفتاح {MAX_RETRIES_API} محاولات)")
+    print("=" * 60)
     app.run_polling()
 
 if __name__ == "__main__":
