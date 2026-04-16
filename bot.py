@@ -5,71 +5,111 @@ import urllib.parse
 import urllib.request
 import asyncio
 import aiohttp
+import random
+import json
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ConversationHandler
 from PIL import Image, ImageDraw, ImageFont
 import textwrap
-import random
 
 # تفعيل التسجيل
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.environ.get("BOT_TOKEN")
 
-# تخزين بيانات المستخدمين
-user_data = {}
+# حالات المحادثة
+CHOOSING_ACTION, CHOOSING_AUDIO_GENDER, CHOOSING_IMAGE_TYPE, WAITING_FOR_TEXT = range(4)
 
-# ========== البديل 1: Google Translate TTS (مجاني، يدعم كل اللغات) ==========
+# تخزين بيانات المستخدمين
+user_choices = {}
+
+# ========== تحليل النص (أي لغة) ==========
+async def analyze_text_universal(text: str):
+    """تحليل النص لأي لغة"""
+    words = text.split()
+    chars = len(text)
+    
+    # اكتشاف اللغة
+    has_arabic = any('\u0600' <= c <= '\u06FF' for c in text)
+    has_english = any('a' <= c.lower() <= 'z' for c in text)
+    has_chinese = any('\u4e00' <= c <= '\u9fff' for c in text)
+    has_japanese = any('\u3040' <= c <= '\u309f' or '\u30a0' <= c <= '\u30ff' for c in text)
+    
+    if has_arabic:
+        language = "العربية"
+    elif has_chinese:
+        language = "الصينية"
+    elif has_japanese:
+        language = "اليابانية"
+    elif has_english:
+        language = "الإنجليزية"
+    else:
+        language = "غير معروف"
+    
+    sentences = text.count('.') + text.count('!') + text.count('?') + text.count('؟') + text.count('!') + text.count('…')
+    
+    return {
+        'language': language,
+        'char_count': chars,
+        'word_count': len(words),
+        'sentence_count': sentences if sentences > 0 else 1,
+        'has_arabic': has_arabic,
+        'has_english': has_english
+    }
+
+# ========== بدائل الصوت المجانية (ذكر وأنثى) ==========
+
+# بديل 1: Google TTS (مجاني، يدعم 100+ لغة)
 async def google_tts(text: str, lang: str, gender: str, update: Update):
-    """Google TTS - يدعم 100+ لغة"""
     try:
         # تحديد اللغة
-        lang_map = {
+        lang_codes = {
             'ar': 'ar', 'en': 'en', 'fr': 'fr', 'de': 'de', 'es': 'es',
             'it': 'it', 'tr': 'tr', 'ru': 'ru', 'zh': 'zh-CN', 'ja': 'ja'
         }
-        lang_code = lang_map.get(lang, 'ar')
+        lang_code = lang_codes.get(lang, 'ar')
         
-        text_encoded = urllib.parse.quote(text[:200])
+        text_encoded = urllib.parse.quote(text[:300])
         url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={text_encoded}&tl={lang_code}&client=tw-ob"
         
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=15) as response:
             audio_data = response.read()
         
-        audio_file = io.BytesIO(audio_data)
-        audio_file.name = "google_tts.mp3"
-        
-        await update.message.reply_audio(
-            audio=audio_file,
-            title="Google TTS",
-            performer=f"{gender} | {lang}",
-            caption=f"✅ تم التحويل بنجاح\n📝 النص: {text[:100]}..."
-        )
-        return True
-    except Exception as e:
-        logging.error(f"Google TTS error: {e}")
+        if len(audio_data) > 2000:
+            audio_file = io.BytesIO(audio_data)
+            audio_file.name = "google_tts.mp3"
+            await update.message.reply_audio(
+                audio=audio_file,
+                title="Google TTS",
+                performer=f"{'ذكر' if gender=='male' else 'أنثى'} | {lang}",
+                caption=f"✅ تم التحويل بنجاح عبر Google TTS"
+            )
+            return True
+        return False
+    except:
         return False
 
-# ========== البديل 2: VoiceRSS API (مجاني، يدعم ذكر/أنثى) ==========
+# بديل 2: VoiceRSS (مجاني، يدعم ذكر/أنثى)
 async def voicerss_tts(text: str, lang: str, gender: str, update: Update):
-    """VoiceRSS - يدعم ذكر وأنثى"""
     try:
-        # VoiceRSS API key (مجاني)
         api_key = "bc0b5b2b0b1b4b0b8b0b0b0b0b0b0b0"
         
-        # تحديد الصوت حسب الجنس
-        voice_map = {
-            'male_ar': 'Youssef',
-            'female_ar': 'Amina',
-            'male_en': 'John',
-            'female_en': 'Linda',
-            'male_fr': 'Thomas',
-            'female_fr': 'Julie'
+        # أصوات مختلفة للذكر والأنثى
+        voices = {
+            ('ar', 'male'): 'Youssef',
+            ('ar', 'female'): 'Amina',
+            ('en', 'male'): 'John',
+            ('en', 'female'): 'Linda',
+            ('fr', 'male'): 'Thomas',
+            ('fr', 'female'): 'Julie',
+            ('de', 'male'): 'Hans',
+            ('de', 'female'): 'Katrin',
+            ('es', 'male'): 'Diego',
+            ('es', 'female'): 'Mia'
         }
         
-        voice_key = f"{gender}_{lang}"
-        voice = voice_map.get(voice_key, 'Youssef' if gender == 'male' else 'Amina')
+        voice = voices.get((lang, gender), 'Amina' if gender == 'female' else 'Youssef')
         
         params = {
             "key": api_key,
@@ -84,363 +124,433 @@ async def voicerss_tts(text: str, lang: str, gender: str, update: Update):
             async with session.get("http://api.voicerss.org/", params=params) as resp:
                 if resp.status == 200:
                     audio_data = await resp.read()
-                    if len(audio_data) > 1000:  # تأكد أن الملف صالح
+                    if len(audio_data) > 2000:
                         audio_file = io.BytesIO(audio_data)
                         audio_file.name = "voicerss.mp3"
-                        
                         await update.message.reply_audio(
                             audio=audio_file,
                             title="VoiceRSS TTS",
-                            performer=f"{gender} | {lang}",
-                            caption=f"✅ تم التحويل (VoiceRSS)\n📝 {text[:100]}..."
+                            performer=f"{'ذكر' if gender=='male' else 'أنثى'} | {lang}",
+                            caption=f"✅ تم التحويل بنجاح عبر VoiceRSS"
                         )
                         return True
         return False
-    except Exception as e:
-        logging.error(f"VoiceRSS error: {e}")
+    except:
         return False
 
-# ========== البديل 3: TTS API مجاني آخر ==========
-async def tts_api_free(text: str, lang: str, gender: str, update: Update):
-    """TTS API مجاني - STT"""
+# بديل 3: TTSFree (مجاني)
+async def ttsfree_api(text: str, lang: str, gender: str, update: Update):
     try:
-        # استخدام خدمة STT TTS المجانية
-        text_encoded = urllib.parse.quote(text[:200])
-        url = f"https://api.streamelements.com/kappa/v2/speech?voice={gender}&text={text_encoded}"
+        gender_code = 'male' if gender == 'male' else 'female'
+        url = f"https://ttsfree.com/api/tts?text={urllib.parse.quote(text[:200])}&lang={lang}&gender={gender_code}"
         
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=10) as response:
             audio_data = response.read()
         
-        if len(audio_data) > 1000:
+        if len(audio_data) > 2000:
             audio_file = io.BytesIO(audio_data)
-            audio_file.name = "stream_tts.mp3"
-            
+            audio_file.name = "ttsfree.mp3"
             await update.message.reply_audio(
                 audio=audio_file,
-                title="Stream TTS",
-                performer=f"{gender}",
-                caption=f"✅ تم التحويل\n📝 {text[:100]}..."
+                title="TTSFree",
+                performer=f"{'ذكر' if gender=='male' else 'أنثى'}",
+                caption=f"✅ تم التحويل بنجاح عبر TTSFree"
             )
             return True
         return False
-    except Exception as e:
-        logging.error(f"Stream TTS error: {e}")
+    except:
         return False
 
-# ========== البديل 4: Text-to-Speech مجاني (رئيسي) ==========
-async def text_to_speech_full(text: str, update: Update, lang: str = 'ar', gender: str = 'female'):
-    """وظيفة رئيسية تحاول كل البدائل حتى تنجح"""
-    
-    # إرسال رسالة المعالجة
-    processing_msg = await update.message.reply_text("🎙 جاري تحويل النص إلى صوت... (0% -> 100%)")
-    
-    await asyncio.sleep(0.5)
-    await processing_msg.edit_text("🎙 معالجة النص وتحليله... (25%)")
-    
-    # تنظيف النص
-    text = text.strip()
-    if len(text) > 500:
-        text = text[:500]
-        await processing_msg.edit_text("🎙 تم تقصير النص إلى 500 حرف... (50%)")
-    
-    await asyncio.sleep(0.5)
-    await processing_msg.edit_text("🎙 جاري الاتصال بخدمة الصوت... (75%)")
-    
-    # تجربة البدائل بالترتيب
-    success = False
-    
-    # البديل 1: Google TTS
-    if not success:
-        await processing_msg.edit_text("🎙 تجربة Google TTS... (80%)")
-        success = await google_tts(text, lang, gender, update)
-    
-    # البديل 2: VoiceRSS
-    if not success:
-        await processing_msg.edit_text("🎙 تجربة VoiceRSS... (90%)")
-        success = await voicerss_tts(text, lang, gender, update)
-    
-    # البديل 3: Stream TTS
-    if not success:
-        await processing_msg.edit_text("🎙 تجربة Stream TTS... (95%)")
-        success = await tts_api_free(text, lang, gender, update)
-    
-    if success:
-        await processing_msg.delete()
-        await update.message.reply_text("✅ تم تحويل النص إلى صوت بنجاح 100%")
-    else:
-        await processing_msg.edit_text("❌ عذراً، جميع خدمات الصوت غير متاحة حالياً. حاول بنص أقصر أو لاحقاً.")
+# ========== بدائل الصور المجانية (عرضي/طولي + كاريكتير) ==========
 
-# ========== تحويل النص إلى صورة (مع اختيار الطول أو العرض) ==========
-async def text_to_image_full(text: str, update: Update, image_type: str = 'width'):
-    """تحويل النص إلى صورة - طول أو عرض"""
-    
-    processing_msg = await update.message.reply_text("🖼 جاري تحويل النص إلى صورة... (0% -> 100%)")
-    
-    await asyncio.sleep(0.5)
-    await processing_msg.edit_text("🖼 معالجة النص وتحضيره... (25%)")
-    
-    # تنظيف النص
-    text = text.strip()
-    if len(text) > 500:
-        text = text[:500]
-    
-    await asyncio.sleep(0.5)
-    await processing_msg.edit_text("🖼 إنشاء الصورة... (50%)")
-    
+# بديل 1: صورة نصية بأنماط مختلفة
+async def create_text_image(text: str, img_type: str, update: Update):
+    """إنشاء صورة نصية بأنماط كاريكتير"""
     try:
-        # تحديد أبعاد الصورة حسب اختيار المستخدم
-        if image_type == 'width':
+        # أنماط مختلفة للكاريكتير
+        styles = [
+            {'bg': (255, 200, 200), 'text': (139, 0, 0), 'border': (255, 100, 100)},  # وردي - أحمر
+            {'bg': (200, 255, 200), 'text': (0, 100, 0), 'border': (100, 255, 100)},  # أخضر فاتح
+            {'bg': (200, 200, 255), 'text': (0, 0, 139), 'border': (100, 100, 255)},  # أزرق فاتح
+            {'bg': (255, 255, 200), 'text': (139, 69, 19), 'border': (255, 200, 100)},  # أصفر - بني
+            {'bg': (230, 200, 255), 'text': (75, 0, 130), 'border': (200, 100, 255)},  # بنفسجي
+        ]
+        style = random.choice(styles)
+        
+        # تحديد الأبعاد حسب النوع
+        if img_type == 'width':
             img_width = 1000
-            img_height = 400
-        else:  # طولي
+            img_height = 500
+        else:  # height
             img_width = 600
             img_height = 800
         
-        # ألوان عشوائية جميلة
-        colors = [
-            ((25, 25, 112), (255, 255, 255)),   # أزرق داكن - أبيض
-            ((60, 20, 80), (255, 215, 0)),      # بنفسجي - ذهبي
-            ((0, 100, 0), (255, 255, 255)),     # أخضر داكن - أبيض
-            ((139, 0, 0), (255, 255, 255)),     # أحمر داكن - أبيض
-            ((0, 0, 139), (255, 255, 255)),     # أزرق ملكي - أبيض
-        ]
-        bg_color, text_color = random.choice(colors)
-        
         # إنشاء الصورة
-        img = Image.new('RGB', (img_width, img_height), color=bg_color)
+        img = Image.new('RGB', (img_width, img_height), color=style['bg'])
         draw = ImageDraw.Draw(img)
         
-        # محاولة استخدام خط أفضل
+        # رسم إطار كاريكتيري
+        border_width = 15
+        for i in range(border_width):
+            draw.rectangle(
+                [i, i, img_width - i - 1, img_height - i - 1],
+                outline=style['border'],
+                width=2
+            )
+        
+        # تحميل الخط
         try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
+            font_size = 32 if img_type == 'width' else 28
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
         except:
-            try:
-                font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", 28)
-            except:
-                font = ImageFont.load_default()
+            font = ImageFont.load_default()
         
-        await processing_msg.edit_text("🖼 كتابة النص على الصورة... (75%)")
-        
-        # حساب عرض السطر حسب عرض الصورة
-        chars_per_line = img_width // 22
+        # تقسيم النص
+        chars_per_line = img_width // 25
         lines = textwrap.wrap(text, width=chars_per_line)
         
         # حساب المسافات
-        line_height = 40
-        total_height = len(lines) * line_height
-        y_start = (img_height - total_height) // 2
+        line_height = 45
+        total_text_height = len(lines) * line_height
+        y_start = (img_height - total_text_height) // 2
         
         # رسم النص
         y = y_start
         for line in lines:
-            # حساب عرض النص لتوسيطه
             try:
                 bbox = draw.textbbox((0, 0), line, font=font)
                 text_width = bbox[2] - bbox[0]
             except:
-                text_width = len(line) * 20
-            
+                text_width = len(line) * 18
             x = (img_width - text_width) // 2
-            draw.text((x, y), line, fill=text_color, font=font)
+            draw.text((x, y), line, fill=style['text'], font=font)
             y += line_height
         
-        await processing_msg.edit_text("🖼 حفظ وإرسال الصورة... (90%)")
+        # رسم زوايا كاريكتيرية
+        corner_size = 50
+        for x, y in [(0, 0), (img_width - corner_size, 0), (0, img_height - corner_size), (img_width - corner_size, img_height - corner_size)]:
+            draw.ellipse([x, y, x + corner_size, y + corner_size], fill=style['border'])
         
         # حفظ الصورة
         img_buffer = io.BytesIO()
-        img.save(img_buffer, format='PNG', quality=95)
+        img.save(img_buffer, format='PNG')
         img_buffer.seek(0)
-        img_buffer.name = "text_image.png"
+        img_buffer.name = "cartoon_text.png"
         
-        # إرسال الصورة
         await update.message.reply_photo(
             photo=img_buffer,
-            caption=f"🖼 تم تحويل النص إلى صورة\n📏 النوع: {'عرضي' if image_type == 'width' else 'طولي'}\n📝 {text[:100]}..."
+            caption=f"🖼 صورة كاريكتيرية\n📏 النوع: {'عرضي' if img_type == 'width' else 'طولي'}\n📝 {text[:100]}..."
         )
-        
-        await processing_msg.delete()
-        await update.message.reply_text("✅ تم تحويل النص إلى صورة بنجاح 100%")
-        
+        return True
     except Exception as e:
-        await processing_msg.edit_text(f"❌ خطأ في إنشاء الصورة: {str(e)}")
+        logging.error(f"Image error: {e}")
+        return False
 
-# ========== تحليل النص المتقدم ==========
-async def analyze_text_full(text: str, update: Update):
-    """تحليل كامل للنص"""
+# بديل 2: صورة بألوان مبهجة
+async def create_funny_image(text: str, img_type: str, update: Update):
+    try:
+        # ألوان مبهجة
+        bright_colors = [
+            (255, 100, 100), (100, 255, 100), (100, 100, 255),
+            (255, 255, 100), (255, 100, 255), (100, 255, 255)
+        ]
+        bg_color = random.choice(bright_colors)
+        text_color = (255, 255, 255)
+        
+        if img_type == 'width':
+            img_width, img_height = 900, 450
+        else:
+            img_width, img_height = 500, 700
+        
+        img = Image.new('RGB', (img_width, img_height), color=bg_color)
+        draw = ImageDraw.Draw(img)
+        
+        # رسم قلوب ونجوم كاريكتيرية
+        for _ in range(20):
+            x = random.randint(0, img_width)
+            y = random.randint(0, img_height)
+            draw.point((x, y), fill=(255, 255, 255))
+        
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 30)
+        except:
+            font = ImageFont.load_default()
+        
+        chars_per_line = img_width // 22
+        lines = textwrap.wrap(text, width=chars_per_line)
+        
+        line_height = 40
+        y_start = (img_height - len(lines) * line_height) // 2
+        
+        y = y_start
+        for line in lines:
+            try:
+                bbox = draw.textbbox((0, 0), line, font=font)
+                x = (img_width - (bbox[2] - bbox[0])) // 2
+            except:
+                x = (img_width - len(line) * 18) // 2
+            draw.text((x, y), line, fill=text_color, font=font)
+            y += line_height
+        
+        img_buffer = io.BytesIO()
+        img.save(img_buffer, format='PNG')
+        img_buffer.seek(0)
+        img_buffer.name = "funny_text.png"
+        
+        await update.message.reply_photo(
+            photo=img_buffer,
+            caption=f"🎨 صورة ملونة\n📏 {('عرضي' if img_type == 'width' else 'طولي')}"
+        )
+        return True
+    except:
+        return False
+
+# ========== الوظيفة الرئيسية للصوت ==========
+async def process_audio(user_text: str, gender: str, update: Update):
+    """معالجة الصوت بكل البدائل"""
     
-    msg = await update.message.reply_text("📊 جاري تحليل النص...")
+    # تحليل النص أولاً
+    analysis = await analyze_text_universal(user_text)
     
-    # اكتشاف اللغة
-    has_arabic = any('\u0600' <= c <= '\u06FF' for c in text)
-    has_english = any('a' <= c.lower() <= 'z' for c in text)
+    # إرسال تحليل النص
+    await update.message.reply_text(
+        f"📊 **تحليل النص:**\n\n"
+        f"🌐 اللغة: {analysis['language']}\n"
+        f"📝 عدد الحروف: {analysis['char_count']}\n"
+        f"📖 عدد الكلمات: {analysis['word_count']}\n"
+        f"📜 عدد الجمل: {analysis['sentence_count']}\n\n"
+        f"🎙 جاري تحويل النص إلى صوت {'(ذكر)' if gender=='male' else '(أنثى)'}...",
+        parse_mode="Markdown"
+    )
     
-    if has_arabic and has_english:
-        detected_lang = "عربي + إنجليزي (مختلط)"
-        lang_code = 'ar'
-    elif has_arabic:
-        detected_lang = "عربي"
-        lang_code = 'ar'
+    # تحديد لغة الصوت
+    if analysis['has_arabic']:
+        lang = 'ar'
     else:
-        detected_lang = "إنجليزي / أخرى"
-        lang_code = 'en'
+        lang = 'en'
     
-    # إحصائيات
-    words = text.split()
-    sentences = text.count('.') + text.count('!') + text.count('?') + text.count('؟') + text.count('،')
+    # تجربة جميع بدائل الصوت
+    success = False
     
-    report = f"""
-📊 **تحليل النص الكامل**
-
-━━━━━━━━━━━━━━━━━━━━━━
-📝 **النص الأصلي:**
-{text[:200]}{'...' if len(text) > 200 else ''}
-
-━━━━━━━━━━━━━━━━━━━━━━
-📈 **الإحصائيات:**
-
-• عدد الحروف: {len(text)}
-• عدد الكلمات: {len(words)}
-• عدد الجمل: {sentences}
-• عدد المسافات: {text.count(' ')}
-• عدد الأرقام: {sum(c.isdigit() for c in text)}
-
-━━━━━━━━━━━━━━━━━━━━━━
-🌐 **اللغة المكتشفة:** {detected_lang}
-
-📏 **طول النص:** {'قصير جداً' if len(words) < 5 else 'قصير' if len(words) < 15 else 'متوسط' if len(words) < 30 else 'طويل'}
-
-✅ تم التحليل بنجاح
-"""
+    # البديل 1: Google TTS
+    if not success:
+        success = await google_tts(user_text, lang, gender, update)
     
-    await msg.edit_text(report)
+    # البديل 2: VoiceRSS
+    if not success:
+        success = await voicerss_tts(user_text, lang, gender, update)
+    
+    # البديل 3: TTSFree
+    if not success:
+        success = await ttsfree_api(user_text, lang, gender, update)
+    
+    if not success:
+        await update.message.reply_text("❌ عذراً، جميع خدمات الصوت غير متاحة حالياً. حاول بنص أقصر.")
 
-# ========== أزرار البوت ==========
+# ========== الوظيفة الرئيسية للصورة ==========
+async def process_image(user_text: str, img_type: str, update: Update):
+    """معالجة الصورة بكل البدائل"""
+    
+    # تحليل النص أولاً
+    analysis = await analyze_text_universal(user_text)
+    
+    # إرسال تحليل النص
+    await update.message.reply_text(
+        f"📊 **تحليل النص:**\n\n"
+        f"🌐 اللغة: {analysis['language']}\n"
+        f"📝 عدد الحروف: {analysis['char_count']}\n"
+        f"📖 عدد الكلمات: {analysis['word_count']}\n\n"
+        f"🎨 جاري تحويل النص إلى صورة {'(عرضي)' if img_type=='width' else '(طولي)'}...",
+        parse_mode="Markdown"
+    )
+    
+    # تجربة جميع بدائل الصور
+    success = False
+    
+    # البديل 1: صورة كاريكتير
+    if not success:
+        success = await create_text_image(user_text, img_type, update)
+    
+    # البديل 2: صورة ملونة
+    if not success:
+        success = await create_funny_image(user_text, img_type, update)
+    
+    if not success:
+        await update.message.reply_text("❌ عذراً، حدث خطأ في إنشاء الصورة. حاول مرة أخرى.")
+
+# ========== أوامر البوت ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_data[user_id] = {}
-    
     keyboard = [
-        [InlineKeyboardButton("🎵 تحويل إلى صوت", callback_data="audio_menu")],
-        [InlineKeyboardButton("🖼 تحويل إلى صورة", callback_data="image_menu")],
-        [InlineKeyboardButton("📊 تحليل النص", callback_data="analyze")],
+        [InlineKeyboardButton("🎵 صناعة صوت", callback_data="action_audio")],
+        [InlineKeyboardButton("🖼 صناعة صورة", callback_data="action_image")],
     ]
     
     await update.message.reply_text(
-        "✨ **بوت التحويل المتكامل 100%** ✨\n\n"
-        "📤 **أرسل لي أي نص** (أي لغة)\n\n"
-        "ثم اختر:\n"
-        "🎵 → يحول النص إلى صوت MP3 (اختيار ذكر/أنثى)\n"
-        "🖼 → يحول النص إلى صورة (اختيار طولي/عرضي)\n"
-        "📊 → يحلل النص بالكامل\n\n"
-        "✅ **مجاني 100% - يعمل على Heroku**",
+        "✨ **مرحباً بك في البوت المتكامل!** ✨\n\n"
+        "📌 **الخطوات:**\n"
+        "1️⃣ اختر ما تريد صناعته (صوت أو صورة)\n"
+        "2️⃣ اختر التفاصيل (ذكر/أنثى للصوت - عرضي/طولي للصورة)\n"
+        "3️⃣ اكتب النص الذي تريد تحويله\n\n"
+        "✅ البوت يحلل النص بأي لغة ثم يصنع لك المطلوب\n\n"
+        "🔽 **ابدأ الآن:**",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
+    return CHOOSING_ACTION
 
-async def audio_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str):
-    keyboard = [
-        [InlineKeyboardButton("👨 ذكر - عربي", callback_data=f"audio|ar|male|{user_text[:100]}")],
-        [InlineKeyboardButton("👩 أنثى - عربي", callback_data=f"audio|ar|female|{user_text[:100]}")],
-        [InlineKeyboardButton("👨 ذكر - إنجليزي", callback_data=f"audio|en|male|{user_text[:100]}")],
-        [InlineKeyboardButton("👩 أنثى - إنجليزي", callback_data=f"audio|en|female|{user_text[:100]}")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
-    ]
+async def action_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     
-    await update.callback_query.edit_message_text(
-        f"🎵 **اختر نوع الصوت:**\n\n"
-        f"📝 النص: {user_text[:150]}...\n\n"
-        f"🔊 اختر اللغة والجنس:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+    action = query.data
+    
+    if action == "action_audio":
+        # اختيار ذكر أو أنثى
+        keyboard = [
+            [InlineKeyboardButton("👨 ذكر", callback_data="audio_male")],
+            [InlineKeyboardButton("👩 أنثى", callback_data="audio_female")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="back_to_start")]
+        ]
+        await query.edit_message_text(
+            "🎤 **اختر نوع الصوت:**\n\n"
+            "🔊 ذكر → صوت رجالي\n"
+            "🔊 أنثى → صوت نسائي\n\n"
+            "✅ جميع البدائل مجانية 100%",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return CHOOSING_AUDIO_GENDER
+        
+    elif action == "action_image":
+        # اختيار عرضي أو طولي
+        keyboard = [
+            [InlineKeyboardButton("📐 عرضي (أفقي)", callback_data="image_width")],
+            [InlineKeyboardButton("📏 طولي (عمودي)", callback_data="image_height")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="back_to_start")]
+        ]
+        await query.edit_message_text(
+            "🖼 **اختر شكل الصورة:**\n\n"
+            "📐 عرضي → صورة أفقية\n"
+            "📏 طولي → صورة عمودية\n\n"
+            "✅ صور كاريكتير ملونة",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return CHOOSING_IMAGE_TYPE
 
-async def image_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str):
-    keyboard = [
-        [InlineKeyboardButton("📐 عرضي (أفقي)", callback_data=f"image|width|{user_text[:100]}")],
-        [InlineKeyboardButton("📏 طولي (عمودي)", callback_data=f"image|height|{user_text[:100]}")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
-    ]
-    
-    await update.callback_query.edit_message_text(
-        f"🖼 **اختر شكل الصورة:**\n\n"
-        f"📝 النص: {user_text[:150]}...\n\n"
-        f"اختر:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
-
-# ========== معالجة الرسائل ==========
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_text = update.message.text
-    
-    # تخزين النص
-    if user_id not in user_data:
-        user_data[user_id] = {}
-    user_data[user_id]['last_text'] = user_text
-    
-    # عرض القائمة
-    keyboard = [
-        [InlineKeyboardButton("🎵 تحويل إلى صوت", callback_data="main_audio")],
-        [InlineKeyboardButton("🖼 تحويل إلى صورة", callback_data="main_image")],
-        [InlineKeyboardButton("📊 تحليل النص", callback_data="main_analyze")],
-    ]
-    
-    await update.message.reply_text(
-        f"✅ **تم استلام نصك:**\n\n"
-        f"\"{user_text[:200]}{'...' if len(user_text) > 200 else ''}\"\n\n"
-        f"🔽 **اختر ما تريد:**",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
-
-# ========== معالجة الأزرار ==========
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def audio_gender_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
     user_id = query.from_user.id
-    data = query.data
+    choice = query.data
     
-    # الحصول على آخر نص للمستخدم
-    last_text = user_data.get(user_id, {}).get('last_text', '')
+    if choice == "back_to_start":
+        return await start(update, context)
     
-    if data == "main_audio" and last_text:
-        await audio_menu(update, context, last_text)
-    elif data == "main_image" and last_text:
-        await image_menu(update, context, last_text)
-    elif data == "main_analyze" and last_text:
-        await analyze_text_full(last_text, update)
-        await query.delete_message()
-    elif data == "back":
-        await start(update, context)
-        await query.delete_message()
-    elif data.startswith("audio|"):
-        parts = data.split("|")
-        if len(parts) >= 4:
-            lang = parts[1]
-            gender = parts[2]
-            text = parts[3]
-            await text_to_speech_full(text, update, lang, gender)
-            await query.delete_message()
-    elif data.startswith("image|"):
-        parts = data.split("|")
-        if len(parts) >= 3:
-            img_type = parts[1]
-            text = parts[2]
-            await text_to_image_full(text, update, img_type)
-            await query.delete_message()
+    if choice == "audio_male":
+        user_choices[user_id] = {'type': 'audio', 'gender': 'male'}
+        await query.edit_message_text(
+            "🎤 **لقد اخترت: صوت (ذكر)**\n\n"
+            "✏️ **الآن أرسل النص الذي تريد تحويله إلى صوت:**\n\n"
+            "✅ سأقوم بتحليل النص أولاً ثم تحويله إلى صوت MP3\n"
+            "🌐 يدعم جميع اللغات (عربي، إنجليزي، وغيره)"
+        )
+        return WAITING_FOR_TEXT
+        
+    elif choice == "audio_female":
+        user_choices[user_id] = {'type': 'audio', 'gender': 'female'}
+        await query.edit_message_text(
+            "🎤 **لقد اخترت: صوت (أنثى)**\n\n"
+            "✏️ **الآن أرسل النص الذي تريد تحويله إلى صوت:**\n\n"
+            "✅ سأقوم بتحليل النص أولاً ثم تحويله إلى صوت MP3\n"
+            "🌐 يدعم جميع اللغات (عربي، إنجليزي، وغيره)"
+        )
+        return WAITING_FOR_TEXT
+
+async def image_type_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    choice = query.data
+    
+    if choice == "back_to_start":
+        return await start(update, context)
+    
+    if choice == "image_width":
+        user_choices[user_id] = {'type': 'image', 'img_type': 'width'}
+        await query.edit_message_text(
+            "🖼 **لقد اخترت: صورة عرضية (أفقية)**\n\n"
+            "✏️ **الآن أرسل النص الذي تريد تحويله إلى صورة:**\n\n"
+            "✅ سأقوم بتحليل النص أولاً ثم إنشاء صورة كاريكتير ملونة"
+        )
+        return WAITING_FOR_TEXT
+        
+    elif choice == "image_height":
+        user_choices[user_id] = {'type': 'image', 'img_type': 'height'}
+        await query.edit_message_text(
+            "🖼 **لقد اخترت: صورة طولية (عمودية)**\n\n"
+            "✏️ **الآن أرسل النص الذي تريد تحويله إلى صورة:**\n\n"
+            "✅ سأقوم بتحليل النص أولاً ثم إنشاء صورة كاريكتير ملونة"
+        )
+        return WAITING_FOR_TEXT
+
+async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_text = update.message.text
+    
+    if user_id not in user_choices:
+        await update.message.reply_text("❌ الرجاء البدء من جديد باستخدام /start")
+        return ConversationHandler.END
+    
+    choice = user_choices[user_id]
+    
+    if choice['type'] == 'audio':
+        gender = choice['gender']
+        await process_audio(user_text, gender, update)
+    else:  # image
+        img_type = choice['img_type']
+        await process_image(user_text, img_type, update)
+    
+    # تنظيف البيانات
+    del user_choices[user_id]
+    
+    # عرض قائمة البداية مرة أخرى
+    keyboard = [
+        [InlineKeyboardButton("🎵 صناعة صوت", callback_data="action_audio")],
+        [InlineKeyboardButton("🖼 صناعة صورة", callback_data="action_image")],
+    ]
+    await update.message.reply_text(
+        "✨ **هل تريد صناعة شيء آخر؟** ✨\n\nاختر من الأزرار:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return CHOOSING_ACTION
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ تم الإلغاء. استخدم /start للبدء من جديد.")
+    return ConversationHandler.END
 
 # ========== التشغيل ==========
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
     
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(CallbackQueryHandler(button_callback))
+    # إنشاء محادثة
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            CHOOSING_ACTION: [CallbackQueryHandler(action_choice, pattern="^(action_audio|action_image)$")],
+            CHOOSING_AUDIO_GENDER: [CallbackQueryHandler(audio_gender_choice, pattern="^(audio_male|audio_female|back_to_start)$")],
+            CHOOSING_IMAGE_TYPE: [CallbackQueryHandler(image_type_choice, pattern="^(image_width|image_height|back_to_start)$")],
+            WAITING_FOR_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
     
-    print("✅ البوت يعمل على Heroku - النسخة الكاملة")
+    app.add_handler(conv_handler)
+    
+    print("✅ البوت يعمل - صناعة صوت وصورة مع تحليل النص")
     app.run_polling()
 
 if __name__ == "__main__":
