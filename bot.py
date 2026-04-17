@@ -1,4 +1,3 @@
-
 import os
 import io
 import logging
@@ -10,6 +9,10 @@ import json
 import base64
 import random
 import re
+import sys
+import signal
+import time
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ConversationHandler
 
@@ -25,127 +28,43 @@ CHOOSING_ACTION, CHOOSING_AUDIO_GENDER, WAITING_FOR_TEXT_AUDIO, WAITING_FOR_TEXT
 # تخزين بيانات المستخدمين
 user_choices = {}
 
-# عدد المحاولات لكل موقع
-MAX_RETRIES_PER_SITE = 3
-MAX_IMAGES_SITES = 60  # 60 موقع لتوليد الصور
+# تخزين حالة المحاولات لكل مستخدم
+user_retry_state = {}
 
-# ========== 60 موقعاً مجانياً لتوليد الصور ==========
-IMAGE_APIS = [
-    # Pollinations (الأفضل)
-    {"name": "Pollinations", "url": "https://image.pollinations.ai/prompt/{}?width=512&height=512&nologo=true&seed={}", "type": "pollinations"},
-    
-    # Craiyon (مشهور)
-    {"name": "Craiyon", "url": "https://backend.craiyon.com/generate", "type": "craiyon"},
-    
-    # Lexica
-    {"name": "Lexica", "url": "https://lexica.art/api/v1/search?q={}", "type": "lexica"},
-    
-    # Playground AI
-    {"name": "Playground", "url": "https://playgroundai.com/api/generate?prompt={}", "type": "direct"},
-    
-    # DeepAI
-    {"name": "DeepAI", "url": "https://api.deepai.org/api/text2img", "type": "deepai"},
-    
-    # Hugging Face (نماذج متعددة)
-    {"name": "HuggingFace SD", "url": "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-v1-5", "type": "huggingface"},
-    {"name": "HuggingFace Anime", "url": "https://api-inference.huggingface.co/models/gsdf/Counterfeit-V2.5", "type": "huggingface"},
-    {"name": "HuggingFace Cartoon", "url": "https://api-inference.huggingface.co/models/simonsmh/anything-v4.0", "type": "huggingface"},
-    
-    # Stability AI Proxy
-    {"name": "Stability AI", "url": "https://stabilityai-whisper-medium.hf.space/api/predict?prompt={}", "type": "direct"},
-    
-    # Clipdrop
-    {"name": "Clipdrop", "url": "https://clipdrop-api.co/text-to-image/v1/generate?text={}", "type": "direct"},
-    
-    # 10 مواقع إضافية من Replicate (بدون مفتاح)
-    {"name": "Replicate 1", "url": "https://replicate.com/api/models/stability-ai/stable-diffusion/predictions", "type": "replicate"},
-    {"name": "Replicate 2", "url": "https://replicate.com/api/models/andreasjansson/stable-diffusion-anime", "type": "replicate"},
-    
-    # خدمات مجانية أخرى
-    {"name": "FreeImage 1", "url": "https://freeimage-generator.com/api/generate?prompt={}", "type": "direct"},
-    {"name": "FreeImage 2", "url": "https://text-to-image-free.com/api?text={}", "type": "direct"},
-    {"name": "FreeImage 3", "url": "https://imagine-free-api.com/generate?q={}", "type": "direct"},
-    {"name": "FreeImage 4", "url": "https://ai-image-generator-free.com/create?prompt={}", "type": "direct"},
-    {"name": "FreeImage 5", "url": "https://cartoon-image-api.com/generate?text={}", "type": "direct"},
-    {"name": "FreeImage 6", "url": "https://free-ai-image.com/api?description={}", "type": "direct"},
-    {"name": "FreeImage 7", "url": "https://imagination-free.com/generate?prompt={}", "type": "direct"},
-    {"name": "FreeImage 8", "url": "https://ai-picture-generator.net/api?text={}", "type": "direct"},
-    {"name": "FreeImage 9", "url": "https://draw-ai-free.com/create?description={}", "type": "direct"},
-    {"name": "FreeImage 10", "url": "https://artificial-intelligence-image.com/generate?prompt={}", "type": "direct"},
-    
-    # مواقع إضافية (20 موقع)
-    {"name": "ImageGen 1", "url": "https://image-gen-free.com/api?prompt={}", "type": "direct"},
-    {"name": "ImageGen 2", "url": "https://free-ai-drawing.com/generate?text={}", "type": "direct"},
-    {"name": "ImageGen 3", "url": "https://cartoon-maker-free.com/api?description={}", "type": "direct"},
-    {"name": "ImageGen 4", "url": "https://ai-cartoon-generator.com/create?prompt={}", "type": "direct"},
-    {"name": "ImageGen 5", "url": "https://free-anime-generator.com/generate?text={}", "type": "direct"},
-    {"name": "ImageGen 6", "url": "https://text2img-free.com/api?q={}", "type": "direct"},
-    {"name": "ImageGen 7", "url": "https://ai-art-free.com/create?description={}", "type": "direct"},
-    {"name": "ImageGen 8", "url": "https://free-drawing-ai.com/generate?prompt={}", "type": "direct"},
-    {"name": "ImageGen 9", "url": "https://imagination-free-api.com?text={}", "type": "direct"},
-    {"name": "ImageGen 10", "url": "https://ai-picture-free.com/api?prompt={}", "type": "direct"},
-    
-    # 30 موقع إضافي
-    {"name": "QuickImage 1", "url": "https://quick-image-gen.com/generate?q={}", "type": "direct"},
-    {"name": "QuickImage 2", "url": "https://fast-ai-image.com/create?text={}", "type": "direct"},
-    {"name": "QuickImage 3", "url": "https://easy-cartoon.com/api?description={}", "type": "direct"},
-    {"name": "QuickImage 4", "url": "https://simple-ai-draw.com/generate?prompt={}", "type": "direct"},
-    {"name": "QuickImage 5", "url": "https://free-art-studio.com/create?text={}", "type": "direct"},
-    {"name": "QuickImage 6", "url": "https://ai-sketch-free.com/api?q={}", "type": "direct"},
-    {"name": "QuickImage 7", "url": "https://cartoon-lab.com/generate?description={}", "type": "direct"},
-    {"name": "QuickImage 8", "url": "https://image-factory-free.com/create?prompt={}", "type": "direct"},
-    {"name": "QuickImage 9", "url": "https://ai-canvas.com/api?text={}", "type": "direct"},
-    {"name": "QuickImage 10", "url": "https://free-imagine-api.com/generate?q={}", "type": "direct"},
-    {"name": "QuickImage 11", "url": "https://draw-master.com/create?prompt={}", "type": "direct"},
-    {"name": "QuickImage 12", "url": "https://ai-pixel.com/generate?text={}", "type": "direct"},
-    {"name": "QuickImage 13", "url": "https://cartoon-world.com/api?description={}", "type": "direct"},
-    {"name": "QuickImage 14", "url": "https://free-sketch-ai.com/create?prompt={}", "type": "direct"},
-    {"name": "QuickImage 15", "url": "https://image-magic.com/generate?text={}", "type": "direct"},
-    {"name": "QuickImage 16", "url": "https://ai-dreamer.com/api?q={}", "type": "direct"},
-    {"name": "QuickImage 17", "url": "https://cartoon-studio.com/create?description={}", "type": "direct"},
-    {"name": "QuickImage 18", "url": "https://free-picture-api.com/generate?prompt={}", "type": "direct"},
-    {"name": "QuickImage 19", "url": "https://ai-creator.com/api?text={}", "type": "direct"},
-    {"name": "QuickImage 20", "url": "https://image-genius.com/generate?q={}", "type": "direct"},
-    {"name": "QuickImage 21", "url": "https://cartoon-factory.com/create?prompt={}", "type": "direct"},
-    {"name": "QuickImage 22", "url": "https://free-ai-paint.com/api?description={}", "type": "direct"},
-    {"name": "QuickImage 23", "url": "https://draw-smart.com/generate?text={}", "type": "direct"},
-    {"name": "QuickImage 24", "url": "https://ai-portrait.com/create?prompt={}", "type": "direct"},
-    {"name": "QuickImage 25", "url": "https://cartoon-me-free.com/api?q={}", "type": "direct"},
-    {"name": "QuickImage 26", "url": "https://free-avatar-maker.com/generate?description={}", "type": "direct"},
-    {"name": "QuickImage 27", "url": "https://ai-studio-free.com/create?text={}", "type": "direct"},
-    {"name": "QuickImage 28", "url": "https://image-studio.com/api?prompt={}", "type": "direct"},
-    {"name": "QuickImage 29", "url": "https://free-drawing-studio.com/generate?q={}", "type": "direct"},
-    {"name": "QuickImage 30", "url": "https://ai-canvas-studio.com/create?description={}", "type": "direct"},
-]
+# ========== مفاتيح API من Heroku ==========
+DEEPSEEK_KEYS = []
+for i in range(1, 10):
+    key = os.environ.get(f"DEEPSEEK_KEY{i}")
+    if key:
+        DEEPSEEK_KEYS.append(key)
 
-# ========== 20 بديلاً مجانياً لشرح النص ==========
-EXPLAIN_APIS = [
-    {"name": "تحليل محلي متقدم", "type": "local_advanced"},
-    {"name": "تحليل ذكي", "type": "local_smart"},
-    {"name": "تحليل بسيط", "type": "local_simple"},
-    {"name": "تحليل النص (API 1)", "url": "https://api.meaningcloud.com/summarization-1.0", "type": "api"},
-    {"name": "تحليل النص (API 2)", "url": "https://text-analysis-api.com/analyze", "type": "api"},
-    {"name": "تحليل النص (API 3)", "url": "https://free-text-analysis.com/api", "type": "api"},
-    {"name": "تحليل النص (API 4)", "url": "https://nlp-free-api.com/process", "type": "api"},
-    {"name": "تحليل النص (API 5)", "url": "https://text-insight.com/analyze", "type": "api"},
-    {"name": "تحليل النص (API 6)", "url": "https://free-language-api.com/parse", "type": "api"},
-    {"name": "تحليل النص (API 7)", "url": "https://ai-text-analyzer.com/api", "type": "api"},
-    {"name": "تحليل النص (API 8)", "url": "https://semantic-analysis-free.com/process", "type": "api"},
-    {"name": "تحليل النص (API 9)", "url": "https://text-summarizer-free.com/summarize", "type": "api"},
-    {"name": "تحليل النص (API 10)", "url": "https://keyword-extractor.com/extract", "type": "api"},
-    {"name": "تحليل النص (API 11)", "url": "https://sentiment-analysis-free.com/analyze", "type": "api"},
-    {"name": "تحليل النص (API 12)", "url": "https://language-detector.com/detect", "type": "api"},
-    {"name": "تحليل النص (API 13)", "url": "https://text-analyzer-free.com/api", "type": "api"},
-    {"name": "تحليل النص (API 14)", "url": "https://nlp-processor.com/analyze", "type": "api"},
-    {"name": "تحليل النص (API 15)", "url": "https://free-linguistics.com/parse", "type": "api"},
-    {"name": "تحليل النص (API 16)", "url": "https://text-metrics.com/calculate", "type": "api"},
-    {"name": "تحليل النص (API 17)", "url": "https://ai-summarizer-free.com/summary", "type": "api"},
-]
+GEMINI_KEYS = []
+for i in range(1, 10):
+    key = os.environ.get(f"GEMINI_KEY{i}")
+    if key:
+        GEMINI_KEYS.append(key)
 
-# ========== وظائف توليد الصور ==========
+OPENROUTER_KEYS = []
+for i in range(1, 10):
+    key = os.environ.get(f"OPENROUTER_KEY{i}")
+    if key:
+        OPENROUTER_KEYS.append(key)
 
+# حالة المفاتيح
+key_states = {
+    'deepseek': {'keys': DEEPSEEK_KEYS, 'current_index': 0, 'failed_keys': set(), 'last_used': 0},
+    'gemini': {'keys': GEMINI_KEYS, 'current_index': 0, 'failed_keys': set(), 'last_used': 0},
+    'openrouter': {'keys': OPENROUTER_KEYS, 'current_index': 0, 'failed_keys': set(), 'last_used': 0}
+}
+
+# إعدادات المحاولات
+MAX_RETRIES_POLLINATIONS = 5  # 5 محاولات لـ Pollinations
+RETRY_DELAY_SECONDS = 60      # انتظار دقيقة بين المحاولات
+MAX_RETRIES_BACKUP_IMAGE = 3
+
+# ========== مواقع توليد الصور ==========
 async def image_pollinations(prompt: str, seed: int):
-    """Pollinations API"""
+    """Pollinations API - سيتم إعادة المحاولة بعد دقيقة إذا فشل"""
     try:
         clean_prompt = prompt.strip().replace(" ", "%20")
         encoded_prompt = urllib.parse.quote(f"{clean_prompt}, cartoon style, colorful, high quality")
@@ -157,7 +76,8 @@ async def image_pollinations(prompt: str, seed: int):
             if len(image_data) > 1000:
                 return image_data
         return None
-    except:
+    except Exception as e:
+        logger.error(f"Pollinations error: {e}")
         return None
 
 async def image_craiyon(prompt: str):
@@ -194,35 +114,6 @@ async def image_lexica(prompt: str):
     except:
         return None
 
-async def image_direct(url_template: str, prompt: str):
-    """طلب مباشر من API"""
-    try:
-        encoded_prompt = urllib.parse.quote(prompt)
-        url = url_template.format(encoded_prompt)
-        
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=20) as response:
-            image_data = response.read()
-            if len(image_data) > 1000:
-                return image_data
-        return None
-    except:
-        return None
-
-async def image_huggingface(url: str, prompt: str):
-    """Hugging Face API"""
-    try:
-        headers = {"Authorization": "Bearer hf_mock"}
-        payload = {"inputs": f"cartoon style, {prompt}"}
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
-                if resp.status == 200:
-                    return await resp.read()
-        return None
-    except:
-        return None
-
 async def image_deepai(prompt: str):
     """DeepAI API"""
     try:
@@ -243,78 +134,7 @@ async def image_deepai(prompt: str):
     except:
         return None
 
-async def try_image_site(site: dict, prompt: str, attempt: int):
-    """محاولة استخدام موقع واحد لتوليد الصورة"""
-    try:
-        if site['type'] == 'pollinations':
-            return await image_pollinations(prompt, random.randint(1, 1000000) + attempt)
-        elif site['type'] == 'craiyon':
-            return await image_craiyon(prompt)
-        elif site['type'] == 'lexica':
-            return await image_lexica(prompt)
-        elif site['type'] == 'deepai':
-            return await image_deepai(prompt)
-        elif site['type'] == 'huggingface':
-            return await image_huggingface(site['url'], prompt)
-        elif site['type'] == 'direct':
-            return await image_direct(site['url'], prompt)
-        else:
-            return await image_direct(site['url'], prompt)
-    except:
-        return None
-
-# ========== وظيفة توليد الصور الرئيسية (60 موقع × 3 محاولات) ==========
-async def generate_image_from_text(prompt: str, update: Update):
-    """توليد صورة باستخدام 60 موقعاً مع 3 محاولات لكل موقع"""
-    
-    total_sites = min(MAX_IMAGES_SITES, len(IMAGE_APIS))
-    processing_msg = await update.message.reply_text(
-        f"🎨 **جاري توليد صورة...**\n\n"
-        f"📝 {prompt[:150]}\n\n"
-        f"🔄 **سيتم تجربة {total_sites} موقعاً، كل موقع {MAX_RETRIES_PER_SITE} محاولات**\n"
-        f"📊 إجمالي المحاولات: {total_sites * MAX_RETRIES_PER_SITE}"
-    )
-    
-    success = False
-    image_data = None
-    
-    for site_idx, site in enumerate(IMAGE_APIS[:total_sites]):
-        if success:
-            break
-            
-        for attempt in range(MAX_RETRIES_PER_SITE):
-            if success:
-                break
-                
-            await processing_msg.edit_text(
-                f"🎨 **الموقع {site_idx + 1}/{total_sites}: {site['name']}**\n"
-                f"🔄 المحاولة {attempt + 1}/{MAX_RETRIES_PER_SITE}\n"
-                f"📝 {prompt[:80]}..."
-            )
-            
-            image_data = await try_image_site(site, prompt, attempt)
-            
-            if image_data:
-                success = True
-                break
-            
-            await asyncio.sleep(0.5)
-    
-    await processing_msg.delete()
-    
-    if success and image_data:
-        image_file = io.BytesIO(image_data)
-        image_file.name = "generated_image.png"
-        await update.message.reply_photo(
-            photo=image_file,
-            caption=f"🎨 **تم توليد الصورة بنجاح!**\n\n📝 {prompt[:150]}..."
-        )
-        await update.message.reply_text("✅ تم توليد الصورة بنجاح!")
-    else:
-        # الحل الأخير: رسم صورة محلية
-        await create_local_image(prompt, update)
-
-async def create_local_image(prompt: str, update: Update):
+async def image_local_fallback(prompt: str, update: Update):
     """رسم صورة محلية (الحل النهائي)"""
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -333,53 +153,294 @@ async def create_local_image(prompt: str, update: Update):
             draw.text((50, y), line, fill=(255, 255, 255), font=font)
             y += 30
         
-        draw.text((50, y+20), "~ تم إنشاء هذه الصورة محلياً ~", fill=(200, 200, 200), font=font)
+        draw.text((50, y+20), "~ صورة احتياطية ~", fill=(200, 200, 200), font=font)
         
         img_buffer = io.BytesIO()
         img.save(img_buffer, format='PNG')
         img_buffer.seek(0)
-        img_buffer.name = "local_image.png"
+        img_buffer.name = "fallback_image.png"
         
         await update.message.reply_photo(
             photo=img_buffer,
-            caption=f"🖼 **صورة محلية (بديل احتياطي)**\n\n📝 {prompt[:150]}..."
+            caption=f"🖼 **صورة احتياطية (محلية)**\n\n📝 {prompt[:150]}..."
         )
+        return True
     except:
-        await update.message.reply_text("❌ عذراً، جميع خدمات الصور غير متاحة حالياً. حاول مرة أخرى.")
+        return False
 
-# ========== وظائف شرح النص (محلية 100% - لا تحتاج مفاتيح) ==========
+# ========== وظيفة توليد الصور مع إعادة المحاولة بعد دقيقة ==========
+async def generate_image_with_retry(prompt: str, update: Update, user_id: int):
+    """توليد صورة مع إعادة المحاولة بعد دقيقة إذا فشل البوت"""
+    
+    # إرسال رسالة المعالجة
+    processing_msg = await update.message.reply_text(
+        f"🎨 **جاري توليد صورة...**\n\n"
+        f"📝 {prompt[:150]}\n\n"
+        f"⏳ سيتم المحاولة {MAX_RETRIES_POLLINATIONS} مرة\n"
+        f"⏱ انتظار {RETRY_DELAY_SECONDS} ثانية بين المحاولات"
+    )
+    
+    image_data = None
+    success = False
+    
+    # المحاولات المتعددة لـ Pollinations
+    for attempt in range(MAX_RETRIES_POLLINATIONS):
+        if success:
+            break
+            
+        await processing_msg.edit_text(
+            f"🎨 **Pollinations - المحاولة {attempt + 1}/{MAX_RETRIES_POLLINATIONS}**\n\n"
+            f"📝 {prompt[:100]}...\n\n"
+            f"⏳ جاري التوليد..."
+        )
+        
+        # محاولة توليد الصورة
+        try:
+            random_seed = random.randint(1, 1000000) + attempt * 1000
+            image_data = await image_pollinations(prompt, random_seed)
+            
+            if image_data:
+                success = True
+                break
+        except Exception as e:
+            logger.error(f"محاولة {attempt + 1} فشلت: {e}")
+        
+        if attempt < MAX_RETRIES_POLLINATIONS - 1:
+            await processing_msg.edit_text(
+                f"⚠️ **المحاولة {attempt + 1} فشلت**\n\n"
+                f"⏳ انتظار {RETRY_DELAY_SECONDS} ثانية قبل المحاولة التالية...\n"
+                f"🔄 سيتم إعادة المحاولة تلقائياً"
+            )
+            await asyncio.sleep(RETRY_DELAY_SECONDS)
+    
+    # إذا فشل Pollinations، جرب البدائل
+    if not success:
+        await processing_msg.edit_text("⚠️ **Pollinations غير متاح، أجرب مواقع بديلة...**")
+        
+        # Craiyon
+        await processing_msg.edit_text("🖼 **جاري تجربة Craiyon...**")
+        image_data = await image_craiyon(prompt)
+        if image_data:
+            success = True
+        
+        # Lexica
+        if not success:
+            await processing_msg.edit_text("🖼 **جاري تجربة Lexica...**")
+            image_data = await image_lexica(prompt)
+            if image_data:
+                success = True
+        
+        # DeepAI
+        if not success:
+            await processing_msg.edit_text("🖼 **جاري تجربة DeepAI...**")
+            image_data = await image_deepai(prompt)
+            if image_data:
+                success = True
+    
+    await processing_msg.delete()
+    
+    if success and image_data:
+        image_file = io.BytesIO(image_data)
+        image_file.name = "generated_image.png"
+        await update.message.reply_photo(
+            photo=image_file,
+            caption=f"🎨 **تم توليد الصورة بنجاح!**\n\n📝 {prompt[:150]}..."
+        )
+        await update.message.reply_text("✅ تم توليد الصورة بنجاح!")
+        return True
+    else:
+        # الرسم المحلي (الحل الأخير)
+        return await image_local_fallback(prompt, update)
 
+# ========== تقسيم النص الطويل وتوليد صور متعددة ==========
+async def generate_images_for_long_text(text: str, update: Update, user_id: int):
+    """تقسيم النص الطويل إلى أجزاء وتوليد صورة لكل جزء"""
+    
+    # تقسيم النص إلى أجزاء
+    lines = text.split('\n')
+    sentences = re.split(r'[.!?؟]\s+', text)
+    
+    # إذا كان النص طويلاً (أكثر من 3 جمل أو 5 أسطر)
+    if len(sentences) > 3 or len(lines) > 5 or len(text) > 300:
+        # تقسيم إلى أجزاء
+        parts = []
+        
+        if len(sentences) > 3:
+            # تقسيم حسب الجمل
+            chunk_size = max(2, len(sentences) // 3)
+            for i in range(0, len(sentences), chunk_size):
+                part = ' '.join(sentences[i:i+chunk_size])
+                if part.strip():
+                    parts.append(part.strip())
+        else:
+            # تقسيم حسب السطور
+            chunk_size = max(2, len(lines) // 3)
+            for i in range(0, len(lines), chunk_size):
+                part = '\n'.join(lines[i:i+chunk_size])
+                if part.strip():
+                    parts.append(part.strip())
+        
+        # إذا كان عدد الأجزاء قليلاً، اجعل 3 أجزاء كحد أقصى
+        parts = parts[:3]
+        
+        # إعلام المستخدم
+        await update.message.reply_text(
+            f"📝 **نص طويل!** سأقوم بتقسيمه إلى {len(parts)} أجزاء\n"
+            f"🖼 سأقوم بتوليد صورة لكل جزء"
+        )
+        
+        # توليد صورة لكل جزء
+        for idx, part in enumerate(parts, 1):
+            await update.message.reply_text(f"🎨 **جاري توليد الصورة {idx}/{len(parts)}...**")
+            await generate_image_with_retry(part, update, user_id)
+            await asyncio.sleep(2)  # انتظار قليل بين الصور
+        
+        return True
+    else:
+        # نص قصير، صورة واحدة فقط
+        return await generate_image_with_retry(text, update, user_id)
+
+# ========== شرح النص باستخدام المفاتيح مع إعادة التدوير ==========
+
+async def call_deepseek_with_retry(prompt: str, update: Update, processing_msg):
+    """DeepSeek مع إعادة تدوير المفاتيح"""
+    keys_list = key_states['deepseek']['keys']
+    
+    if not keys_list:
+        return False
+    
+    for key_idx, api_key in enumerate(keys_list):
+        if key_idx in key_states['deepseek']['failed_keys']:
+            continue
+        
+        await processing_msg.edit_text(f"📖 **DeepSeek - مفتاح {key_idx + 1}/{len(keys_list)}**")
+        
+        try:
+            url = "https://api.deepseek.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            data = {
+                "model": "deepseek-chat",
+                "messages": [
+                    {"role": "system", "content": "أنت مساعد ذكي متخصص في تحليل وشرح النصوص. قم بتحليل النص التالي وشرحه بشكل مفصل باللغة العربية."},
+                    {"role": "user", "content": f"قم بتحليل وشرح هذا النص بشكل مفصل:\n\n{prompt}"}
+                ],
+                "max_tokens": 2000
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=data, timeout=30) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        explanation = result['choices'][0]['message']['content']
+                        await update.message.reply_text(f"📚 **شرح DeepSeek AI**\n\n{explanation}")
+                        return True
+                    else:
+                        key_states['deepseek']['failed_keys'].add(key_idx)
+                        logger.warning(f"DeepSeek key {key_idx + 1} فشل مع status {resp.status}")
+        except Exception as e:
+            key_states['deepseek']['failed_keys'].add(key_idx)
+            logger.error(f"DeepSeek key {key_idx + 1} error: {e}")
+    
+    return False
+
+async def call_gemini_with_retry(prompt: str, update: Update, processing_msg):
+    """Gemini مع إعادة تدوير المفاتيح"""
+    keys_list = key_states['gemini']['keys']
+    
+    if not keys_list:
+        return False
+    
+    for key_idx, api_key in enumerate(keys_list):
+        if key_idx in key_states['gemini']['failed_keys']:
+            continue
+        
+        await processing_msg.edit_text(f"📖 **Gemini - مفتاح {key_idx + 1}/{len(keys_list)}**")
+        
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={api_key}"
+            headers = {"Content-Type": "application/json"}
+            data = {
+                "contents": [{
+                    "parts": [{"text": f"قم بتحليل وشرح هذا النص بشكل مفصل باللغة العربية:\n\n{prompt}"}]
+                }]
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=data, timeout=30) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        explanation = result['candidates'][0]['content']['parts'][0]['text']
+                        await update.message.reply_text(f"📚 **شرح Gemini AI**\n\n{explanation}")
+                        return True
+                    else:
+                        key_states['gemini']['failed_keys'].add(key_idx)
+                        logger.warning(f"Gemini key {key_idx + 1} فشل")
+        except Exception as e:
+            key_states['gemini']['failed_keys'].add(key_idx)
+            logger.error(f"Gemini key {key_idx + 1} error: {e}")
+    
+    return False
+
+async def call_openrouter_with_retry(prompt: str, update: Update, processing_msg):
+    """OpenRouter مع إعادة تدوير المفاتيح"""
+    keys_list = key_states['openrouter']['keys']
+    
+    if not keys_list:
+        return False
+    
+    for key_idx, api_key in enumerate(keys_list):
+        if key_idx in key_states['openrouter']['failed_keys']:
+            continue
+        
+        await processing_msg.edit_text(f"📖 **OpenRouter - مفتاح {key_idx + 1}/{len(keys_list)}**")
+        
+        try:
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            data = {
+                "model": "openai/gpt-3.5-turbo",
+                "messages": [
+                    {"role": "system", "content": "أنت مساعد متخصص في تحليل النصوص."},
+                    {"role": "user", "content": f"حلل واشرح هذا النص باللغة العربية:\n\n{prompt}"}
+                ]
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=data, timeout=30) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        explanation = result['choices'][0]['message']['content']
+                        await update.message.reply_text(f"📚 **شرح OpenRouter AI**\n\n{explanation}")
+                        return True
+                    else:
+                        key_states['openrouter']['failed_keys'].add(key_idx)
+                        logger.warning(f"OpenRouter key {key_idx + 1} فشل")
+        except Exception as e:
+            key_states['openrouter']['failed_keys'].add(key_idx)
+            logger.error(f"OpenRouter key {key_idx + 1} error: {e}")
+    
+    return False
+
+# شرح محلي (البديل النهائي)
 async def explain_local_advanced(text: str, update: Update):
-    """شرح متقدم محلياً"""
+    """شرح متقدم محلياً (يعمل دائماً)"""
     words = text.split()
     sentences = re.split(r'[.!?؟]+', text)
     sentences = [s for s in sentences if s.strip()]
     
-    # حساب الحروف (بدون مسافات)
     chars_no_spaces = len(text.replace(" ", "").replace("\n", ""))
     
-    # اكتشاف اللغة
     has_arabic = any('\u0600' <= c <= '\u06FF' for c in text)
-    has_english = any('a' <= c.lower() <= 'z' for c in text)
-    has_chinese = any('\u4e00' <= c <= '\u9fff' for c in text)
-    has_japanese = any('\u3040' <= c <= '\u309f' or '\u30a0' <= c <= '\u30ff' for c in text)
     
-    if has_arabic:
-        language = "العربية"
-    elif has_chinese:
-        language = "الصينية"
-    elif has_japanese:
-        language = "اليابانية"
-    elif has_english:
-        language = "الإنجليزية"
-    else:
-        language = "غير معروف"
-    
-    # إحصائيات متقدمة
     word_lengths = [len(w) for w in words]
     avg_word_length = sum(word_lengths) / len(word_lengths) if words else 0
     
-    # الكلمات الأكثر تكراراً
     word_freq = {}
     for word in words:
         word_lower = word.lower()
@@ -387,29 +448,8 @@ async def explain_local_advanced(text: str, update: Update):
     
     most_common = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:5]
     
-    # تحليل المشاعر
-    positive_words = ['جميل', 'رائع', 'سعيد', 'فرح', 'حب', 'good', 'happy', 'love', 'beautiful', 'great', 'nice', 'wonderful']
-    negative_words = ['سيء', 'حزين', 'صعب', 'كئيب', 'bad', 'sad', 'hard', 'angry', 'hate', 'terrible', 'awful', 'ugly']
-    
-    pos_count = sum(1 for word in words if word.lower() in positive_words)
-    neg_count = sum(1 for word in words if word.lower() in negative_words)
-    
-    if pos_count > neg_count:
-        sentiment = "😊 إيجابي"
-        sentiment_score = "إيجابي"
-    elif neg_count > pos_count:
-        sentiment = "😔 سلبي"
-        sentiment_score = "سلبي"
-    else:
-        sentiment = "😐 محايد"
-        sentiment_score = "محايد"
-    
-    # أنواع الجمل
-    question_count = text.count('?') + text.count('؟')
-    exclamation_count = text.count('!')
-    
     explanation = f"""
-📚 **تحليل وشرح النص (متقدم)**
+📚 **تحليل وشرح النص (متقدم محلي)**
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📝 **النص الأصلي:**
@@ -424,14 +464,7 @@ async def explain_local_advanced(text: str, update: Update):
 • متوسط طول الكلمة: {avg_word_length:.1f} حروف
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📈 **الإحصائيات الإضافية:**
-• عدد علامات الاستفهام: {question_count}
-• عدد علامات التعجب: {exclamation_count}
-• عدد الأرقام: {sum(c.isdigit() for c in text)}
-• عدد المسافات: {text.count(' ')}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🌐 **اللغة المكتشفة:** {language}
+🌐 **اللغة المكتشفة:** {'عربية' if has_arabic else 'إنجليزية/أخرى'}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🔝 **الكلمات الأكثر تكراراً:**
@@ -441,178 +474,48 @@ async def explain_local_advanced(text: str, update: Update):
     
     explanation += f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎭 **تحليل المشاعر:** {sentiment}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📏 **تقييم النص:**
-• الطول: {'قصير جداً' if len(words) < 10 else 'قصير' if len(words) < 20 else 'متوسط' if len(words) < 50 else 'طويل'}
-• التعقيد: {'بسيط' if avg_word_length < 5 else 'متوسط' if avg_word_length < 7 else 'معقد'}
+• الطول: {'قصير' if len(words) < 20 else 'متوسط' if len(words) < 50 else 'طويل'}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 💡 **ملخص النص:**
-{text[:300]}{'...' if len(text) > 300 else ''}
+{text[:200]}{'...' if len(text) > 200 else ''}
 
 ✅ **تم التحليل والشرح بنجاح**
 """
     await update.message.reply_text(explanation)
     return True
 
-async def explain_local_smart(text: str, update: Update):
-    """شرح ذكي محلياً"""
-    words = text.split()
-    
-    # تقسيم إلى جمل
-    sentences = re.split(r'[.!?؟]+', text)
-    sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
-    
-    # أهم جملة (أطول جملة)
-    main_sentence = max(sentences, key=len) if sentences else text[:200]
-    
-    # تحديد الموضوعات
-    topics = []
-    topic_keywords = {
-        'قصة/حدث': ['كان', 'حدث', 'ذات', 'يوم', 'مرة', 'ذهب', 'جاء'],
-        'وصف/مشهد': ['جميل', 'كبير', 'صغير', 'لون', 'شكل', 'يبدو', 'يشبه'],
-        'مشاعر/عواطف': ['سعيد', 'حزين', 'خائف', 'فرحان', 'زعلان', 'حب', 'كره'],
-        'رأي/تقدير': ['أعتقد', 'أظن', 'برأيي', 'الأفضل', 'الأسوأ'],
-        'سؤال/استفسار': ['؟', 'ما', 'لماذا', 'كيف', 'أين', 'متى']
-    }
-    
-    for topic, keywords in topic_keywords.items():
-        for keyword in keywords:
-            if keyword in text:
-                topics.append(topic)
-                break
-    
-    topics = list(set(topics)) if topics else ['عام']
-    
-    # مستويات القراءة
-    if len(words) < 50:
-        reading_level = "مناسب لجميع المستويات"
-    elif len(words) < 150:
-        reading_level = "متوسط، مناسب للقراءة العامة"
-    else:
-        reading_level = "طويل، يحتاج تركيز"
-    
-    explanation = f"""
-🧠 **تحليل ذكي للنص**
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📖 **خلاصة النص:**
-{main_sentence[:300]}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🏷 **المواضيع الرئيسية:** {', '.join(topics)}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📚 **مستوى القراءة:** {reading_level}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 **حقائق سريعة:**
-• عدد الكلمات: {len(words)}
-• عدد الجمل: {len(sentences)}
-• عدد الأحرف: {len(text)}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-💡 **نقاط رئيسية في النص:**
-"""
-    # استخراج أهم الجمل
-    important_sentences = sorted(sentences, key=len, reverse=True)[:3]
-    for i, sent in enumerate(important_sentences, 1):
-        explanation += f"{i}. {sent[:100]}...\n"
-    
-    explanation += """
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ **تم التحليل الذكي بنجاح**
-"""
-    await update.message.reply_text(explanation)
-    return True
-
-async def explain_local_simple(text: str, update: Update):
-    """شرح بسيط محلياً"""
-    words = text.split()
-    sentences = text.count('.') + text.count('!') + text.count('?') + text.count('؟')
-    
-    has_arabic = any('\u0600' <= c <= '\u06FF' for c in text)
-    
-    explanation = f"""
-📝 **شرح بسيط للنص**
-
-━━━━━━━━━━━━━━━━━━━━━━
-📖 **النص:**
-{text[:400]}{'...' if len(text) > 400 else ''}
-
-━━━━━━━━━━━━━━━━━━━━━━
-📊 **معلومات سريعة:**
-• عدد الكلمات: {len(words)}
-• عدد الحروف: {len(text)}
-• عدد الجمل: {sentences if sentences > 0 else 1}
-• اللغة: {'عربية' if has_arabic else 'إنجليزية/أخرى'}
-
-━━━━━━━━━━━━━━━━━━━━━━
-💡 **ما فهمته من النص:**
-{text[:200]}{'...' if len(text) > 200 else ''}
-
-✅ تم التحليل بنجاح
-"""
-    await update.message.reply_text(explanation)
-    return True
-
-async def explain_external_api(url: str, text: str, update: Update):
-    """محاولة شرح عبر API خارجي"""
-    try:
-        encoded_text = urllib.parse.quote(text[:500])
-        full_url = f"{url}?text={encoded_text}"
-        
-        req = urllib.request.Request(full_url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = response.read().decode('utf-8')
-            await update.message.reply_text(f"📚 **شرح النص (API)**\n\n{data[:2000]}")
-            return True
-    except:
-        return False
-
-# ========== وظيفة شرح النص الرئيسية ==========
 async def explain_text_full(text: str, update: Update):
-    """شرح النص باستخدام جميع البدائل"""
+    """شرح النص باستخدام المفاتيح مع إعادة التدوير"""
     
     processing_msg = await update.message.reply_text("📖 **جاري تحليل وشرح النص...**")
     
     success = False
     
-    # البدائل المحلية (تعمل دائماً)
-    await processing_msg.edit_text("📖 **البديل 1/20: تحليل متقدم...**")
-    success = await explain_local_advanced(text, update)
+    # الأولوية: DeepSeek
+    if DEEPSEEK_KEYS and not success:
+        success = await call_deepseek_with_retry(text, update, processing_msg)
     
+    # الثاني: Gemini
+    if GEMINI_KEYS and not success:
+        success = await call_gemini_with_retry(text, update, processing_msg)
+    
+    # الثالث: OpenRouter
+    if OPENROUTER_KEYS and not success:
+        success = await call_openrouter_with_retry(text, update, processing_msg)
+    
+    # الرابع: شرح محلي (يعمل دائماً)
     if not success:
-        await processing_msg.edit_text("📖 **البديل 2/20: تحليل ذكي...**")
-        success = await explain_local_smart(text, update)
-    
-    if not success:
-        await processing_msg.edit_text("📖 **البديل 3/20: تحليل بسيط...**")
-        success = await explain_local_simple(text, update)
-    
-    # تجربة APIs الخارجية
-    for i, api in enumerate(EXPLAIN_APIS[3:], 4):
-        if not success and api['type'] == 'api':
-            await processing_msg.edit_text(f"📖 **البديل {i}/20: {api['name']}...**")
-            success = await explain_external_api(api['url'], text, update)
+        await processing_msg.edit_text("📖 **جميع الخدمات غير متاحة، جاري التحليل المحلي...**")
+        success = await explain_local_advanced(text, update)
     
     await processing_msg.delete()
     
-    if not success:
-        # الحل النهائي
-        await update.message.reply_text(
-            f"📚 **تحليل النص (بديل نهائي)**\n\n"
-            f"📝 النص: {text[:300]}...\n\n"
-            f"📊 عدد الكلمات: {len(text.split())}\n"
-            f"📊 عدد الحروف: {len(text)}\n\n"
-            f"✅ تم التحليل بنجاح"
-        )
+    if success:
+        await update.message.reply_text("✅ تم تحليل وشرح النص بنجاح!")
 
 # ========== تحويل النص إلى صوت ==========
 async def google_tts_with_retry(text: str, lang: str, gender: str, update: Update, processing_msg):
-    """Google TTS مع 3 محاولات"""
     for attempt in range(3):
         await processing_msg.edit_text(f"🎙 **تحويل الصوت - المحاولة {attempt + 1}/3**")
         try:
@@ -640,14 +543,13 @@ async def google_tts_with_retry(text: str, lang: str, gender: str, update: Updat
             logger.error(f"TTS attempt {attempt + 1} failed: {e}")
             if attempt < 2:
                 await asyncio.sleep(1)
-            continue
     return False
 
 async def generate_audio(text: str, gender: str, update: Update):
     has_arabic = any('\u0600' <= c <= '\u06FF' for c in text)
     lang = 'ar' if has_arabic else 'en'
     
-    processing_msg = await update.message.reply_text(f"🎙 **جاري تحويل النص إلى صوت (3 محاولات)...**")
+    processing_msg = await update.message.reply_text(f"🎙 **جاري تحويل النص إلى صوت...**")
     
     success = await google_tts_with_retry(text, lang, gender, update, processing_msg)
     
@@ -666,19 +568,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📖 شرح وتحليل النص", callback_data="action_explain")],
     ]
     
-    total_sites = min(MAX_IMAGES_SITES, len(IMAGE_APIS))
-    
     await update.message.reply_text(
         f"✨ **مرحباً بك في البوت المتكامل!** ✨\n\n"
         f"🎨 **توليد صورة:**\n"
-        f"   • {total_sites} موقعاً لتوليد الصور\n"
-        f"   • كل موقع {MAX_RETRIES_PER_SITE} محاولات\n"
-        f"   • إجمالي المحاولات: {total_sites * MAX_RETRIES_PER_SITE}\n\n"
+        f"   • {MAX_RETRIES_POLLINATIONS} محاولات لـ Pollinations\n"
+        f"   • انتظار {RETRY_DELAY_SECONDS} ثانية بين المحاولات\n"
+        f"   • تقسيم النصوص الطويلة إلى صور متعددة\n\n"
         f"🎵 **تحويل نص إلى صوت:** 3 محاولات\n\n"
         f"📖 **شرح وتحليل النص:**\n"
-        f"   • 20 بديلاً للشرح (محلي + APIs)\n"
-        f"   • لا يحتاج مفاتيح API\n"
-        f"   • تحليل متقدم: كلمات، جمل، مشاعر، لغة\n\n"
+        f"   • DeepSeek, Gemini, OpenRouter مع إعادة تدوير المفاتيح\n"
+        f"   • مفاتيح متاحة: DeepSeek({len(DEEPSEEK_KEYS)}), Gemini({len(GEMINI_KEYS)}), OpenRouter({len(OPENROUTER_KEYS)})\n"
+        f"   • بديل محلي يعمل دائماً\n\n"
         f"🔽 **اختر ما تريد:**",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -700,13 +600,15 @@ async def action_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOOSING_AUDIO_GENDER
         
     elif action == "action_image":
-        total_sites = min(MAX_IMAGES_SITES, len(IMAGE_APIS))
         await query.edit_message_text(
             "🎨 **توليد صورة من النص**\n\n"
             "✏️ **أرسل وصف الصورة:**\n\n"
-            f"✅ {total_sites} موقعاً لتوليد الصور\n"
-            f"✅ كل موقع {MAX_RETRIES_PER_SITE} محاولات\n"
-            f"✅ إجمالي المحاولات: {total_sites * MAX_RETRIES_PER_SITE}"
+            f"✅ {MAX_RETRIES_POLLINATIONS} محاولات لـ Pollinations\n"
+            f"✅ انتظار {RETRY_DELAY_SECONDS} ثانية بين المحاولات\n"
+            f"✅ النصوص الطويلة تقسم إلى صور متعددة\n\n"
+            "📝 أمثلة:\n"
+            "• ولد في حديقة مع زهور\n"
+            "• قطة نائمة على كنبة"
         )
         return WAITING_FOR_TEXT_IMAGE
         
@@ -714,11 +616,10 @@ async def action_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "📖 **شرح وتحليل النص**\n\n"
             "✏️ **أرسل النص لتحليله:**\n\n"
-            "✅ 20 بديلاً للشرح\n"
-            "✅ تحليل: عدد الكلمات والحروف والجمل\n"
-            "✅ تحليل المشاعر واللغة\n"
-            "✅ الكلمات الأكثر تكراراً\n"
-            "✅ لا يحتاج مفاتيح API"
+            f"✅ DeepSeek: {len(DEEPSEEK_KEYS)} مفتاح\n"
+            f"✅ Gemini: {len(GEMINI_KEYS)} مفتاح\n"
+            f"✅ OpenRouter: {len(OPENROUTER_KEYS)} مفتاح\n"
+            f"✅ بديل محلي يعمل دائماً"
         )
         return WAITING_FOR_EXPLAIN
         
@@ -763,8 +664,10 @@ async def receive_audio_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return CHOOSING_ACTION
 
 async def receive_image_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     user_text = update.message.text
-    await generate_image_from_text(user_text, update)
+    
+    await generate_images_for_long_text(user_text, update, user_id)
     
     keyboard = [
         [InlineKeyboardButton("🎨 توليد صورة", callback_data="action_image")],
@@ -790,8 +693,24 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ تم الإلغاء. استخدم /start للبدء.")
     return ConversationHandler.END
 
+# ========== إعادة التشغيل التلقائي ==========
+def restart_bot():
+    """إعادة تشغيل البوت تلقائياً"""
+    logger.warning("⚠️ جاري إعادة تشغيل البوت...")
+    time.sleep(2)
+    os.execl(sys.executable, sys.executable, *sys.argv)
+
+def signal_handler(signum, frame):
+    """معالج إشارات لإعادة التشغيل"""
+    logger.warning(f"⚠️ استقبل إشارة {signum}، جاري إعادة التشغيل...")
+    restart_bot()
+
 # ========== التشغيل ==========
 def main():
+    # تسجيل معالج الإشارات لإعادة التشغيل التلقائي
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
     app = ApplicationBuilder().token(TOKEN).build()
     
     conv_handler = ConversationHandler(
@@ -808,16 +727,23 @@ def main():
     
     app.add_handler(conv_handler)
     
-    total_sites = min(MAX_IMAGES_SITES, len(IMAGE_APIS))
+    print("=" * 60)
+    print("✅ البوت يعمل مع نظام إعادة التشغيل التلقائي!")
+    print(f"📊 Pollinations: {MAX_RETRIES_POLLINATIONS} محاولات")
+    print(f"📊 انتظار {RETRY_DELAY_SECONDS} ثانية بين المحاولات")
+    print(f"📊 تقسيم النصوص الطويلة إلى صور متعددة")
+    print(f"📊 DeepSeek Keys: {len(DEEPSEEK_KEYS)}")
+    print(f"📊 Gemini Keys: {len(GEMINI_KEYS)}")
+    print(f"📊 OpenRouter Keys: {len(OPENROUTER_KEYS)}")
+    print("=" * 60)
     
-    print("=" * 60)
-    print("✅ البوت يعمل مع 60 موقعاً للصور + 20 بديلاً للشرح!")
-    print(f"📊 مواقع الصور: {total_sites} موقع")
-    print(f"📊 محاولات كل موقع: {MAX_RETRIES_PER_SITE}")
-    print(f"📊 إجمالي محاولات الصور: {total_sites * MAX_RETRIES_PER_SITE}")
-    print(f"📊 بدائل شرح النص: {len(EXPLAIN_APIS)} بديل")
-    print("=" * 60)
-    app.run_polling()
+    try:
+        app.run_polling()
+    except Exception as e:
+        logger.error(f"⚠️ البوت توقف: {e}")
+        logger.warning("🔄 جاري إعادة التشغيل التلقائي بعد 5 ثوان...")
+        time.sleep(5)
+        restart_bot()
 
 if __name__ == "__main__":
     main()
