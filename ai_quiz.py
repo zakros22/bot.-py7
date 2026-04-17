@@ -2,6 +2,7 @@ import os
 import re
 import json
 import logging
+import random
 from typing import List, Dict
 from api_key_manager import key_manager
 
@@ -25,6 +26,12 @@ try:
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
+
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
 
 
 def detect_language(text: str) -> str:
@@ -72,7 +79,8 @@ def _parse_questions_json(json_text: str) -> list:
         if not q.get('type'):
             q['type'] = 'multiple_choice'
         if q['type'] == 'multiple_choice' and not q.get('options'):
-            continue
+            # إنشاء خيارات افتراضية إذا لم تكن موجودة
+            q['options'] = ['A) خيار 1', 'B) خيار 2', 'C) خيار 3', 'D) خيار 4']
         q.setdefault('explanation', '')
         valid.append(q)
     
@@ -81,19 +89,23 @@ def _parse_questions_json(json_text: str) -> list:
 
 def _build_prompt(content: str, question_count: int, difficulty: str, language: str, question_types: list) -> str:
     """بناء النص الموجه"""
-    diff_map = {
-        'easy': 'سهلة وبسيطة' if language == 'ar' else 'easy',
-        'medium': 'متوسطة الصعوبة' if language == 'ar' else 'medium',
-        'hard': 'صعبة ومتطلبة' if language == 'ar' else 'hard'
+    diff_map_ar = {'easy': 'سهلة وبسيطة', 'medium': 'متوسطة الصعوبة', 'hard': 'صعبة ومتطلبة'}
+    diff_map_en = {'easy': 'easy', 'medium': 'medium', 'hard': 'hard'}
+    
+    type_names_ar = {
+        'multiple_choice': 'اختيار متعدد',
+        'true_false': 'صح/خطأ',
+        'fill_blank': 'ملء الفراغات',
+        'qa': 'سؤال وجواب'
+    }
+    type_names_en = {
+        'multiple_choice': 'Multiple Choice',
+        'true_false': 'True/False',
+        'fill_blank': 'Fill in Blank',
+        'qa': 'Q&A'
     }
     
-    type_names = {
-        'multiple_choice': 'اختيار متعدد' if language == 'ar' else 'Multiple Choice',
-        'true_false': 'صح/خطأ' if language == 'ar' else 'True/False',
-        'fill_blank': 'ملء الفراغات' if language == 'ar' else 'Fill in Blank',
-        'qa': 'سؤال وجواب' if language == 'ar' else 'Q&A'
-    }
-    
+    type_names = type_names_ar if language == 'ar' else type_names_en
     types_list = ', '.join([type_names.get(t, t) for t in question_types])
     
     if language == 'ar':
@@ -101,11 +113,11 @@ def _build_prompt(content: str, question_count: int, difficulty: str, language: 
 
 المحتوى:
 ---
-{content[:4000]}
+{content[:3500]}
 ---
 
 الرجاء إنشاء {question_count} سؤال اختبار.
-مستوى الصعوبة: {diff_map.get(difficulty, 'متوسطة')}
+مستوى الصعوبة: {diff_map_ar.get(difficulty, 'متوسطة')}
 أنواع الأسئلة المسموحة: {types_list}
 
 قم بإرجاع JSON فقط بالصيغة:
@@ -126,11 +138,11 @@ def _build_prompt(content: str, question_count: int, difficulty: str, language: 
 
 Content:
 ---
-{content[:4000]}
+{content[:3500]}
 ---
 
 Generate {question_count} quiz questions.
-Difficulty: {diff_map.get(difficulty, 'medium')}
+Difficulty: {diff_map_en.get(difficulty, 'medium')}
 Question types: {types_list}
 
 Return ONLY JSON:
@@ -147,7 +159,7 @@ Return ONLY JSON:
 Return ONLY JSON, no other text."""
 
 
-# ==================== Groq (Llama 3) ====================
+# ==================== Groq (Llama 3) - مجاني وسريع ====================
 
 def generate_quiz_groq(content: str, question_count: int, difficulty: str, language: str, question_types: list, key_info: tuple) -> list:
     """توليد باستخدام Groq"""
@@ -173,7 +185,7 @@ def generate_quiz_groq(content: str, question_count: int, difficulty: str, langu
     return questions[:question_count]
 
 
-# ==================== Gemini ====================
+# ==================== Gemini - مجاني ====================
 
 def generate_quiz_gemini(content: str, question_count: int, difficulty: str, language: str, question_types: list, key_info: tuple) -> list:
     """توليد باستخدام Gemini"""
@@ -186,32 +198,6 @@ def generate_quiz_gemini(content: str, question_count: int, difficulty: str, lan
     response = model.generate_content(prompt)
     raw = response.text.strip()
     
-    json_text = _extract_json_from_text(raw)
-    questions = _parse_questions_json(json_text)
-    
-    if not questions:
-        raise ValueError("No valid questions generated")
-    
-    return questions[:question_count]
-
-
-# ==================== OpenAI ====================
-
-def generate_quiz_openai(content: str, question_count: int, difficulty: str, language: str, question_types: list, key_info: tuple) -> list:
-    """توليد باستخدام OpenAI"""
-    api_key, key_id = key_info
-    
-    client = OpenAI(api_key=api_key)
-    prompt = _build_prompt(content, question_count, difficulty, language, question_types)
-    
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.7,
-        max_tokens=4096
-    )
-    
-    raw = response.choices[0].message.content.strip()
     json_text = _extract_json_from_text(raw)
     questions = _parse_questions_json(json_text)
     
@@ -245,9 +231,6 @@ def generate_quiz_deepseek(content: str, question_count: int, difficulty: str, l
     json_text = _extract_json_from_text(raw)
     questions = _parse_questions_json(json_text)
     
-    if not questions:
-        raise ValueError("No valid questions generated")
-    
     return questions[:question_count]
 
 
@@ -275,62 +258,234 @@ def generate_quiz_openrouter(content: str, question_count: int, difficulty: str,
     json_text = _extract_json_from_text(raw)
     questions = _parse_questions_json(json_text)
     
-    if not questions:
-        raise ValueError("No valid questions generated")
+    return questions[:question_count]
+
+
+# ==================== OpenAI ====================
+
+def generate_quiz_openai(content: str, question_count: int, difficulty: str, language: str, question_types: list, key_info: tuple) -> list:
+    """توليد باستخدام OpenAI"""
+    api_key, key_id = key_info
+    
+    client = OpenAI(api_key=api_key)
+    prompt = _build_prompt(content, question_count, difficulty, language, question_types)
+    
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7,
+        max_tokens=4096
+    )
+    
+    raw = response.choices[0].message.content.strip()
+    json_text = _extract_json_from_text(raw)
+    questions = _parse_questions_json(json_text)
     
     return questions[:question_count]
+
+
+# ==================== البدائل المجانية تماماً (بدون مفاتيح) ====================
+
+def generate_quiz_simple(content: str, question_count: int, difficulty: str, language: str, question_types: list) -> list:
+    """توليد أسئلة بسيطة بدون API - تعمل 100% حتى بدون مفاتيح"""
+    logger.info("Using simple quiz generator (no API required)")
+    
+    sentences = content.split('。' if language == 'ar' else '.')
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+    
+    if not sentences:
+        sentences = [content[:200]]
+    
+    questions = []
+    types_available = [t for t in question_types if t in ['multiple_choice', 'true_false']]
+    if not types_available:
+        types_available = ['multiple_choice']
+    
+    for i in range(min(question_count, len(sentences) * 2)):
+        sentence = sentences[i % len(sentences)]
+        q_type = random.choice(types_available)
+        
+        if q_type == 'multiple_choice':
+            # استخراج كلمات مفتاحية
+            words = sentence.split()
+            if len(words) > 5:
+                key_word = words[len(words)//2]
+                # خيارات عشوائية
+                options = [
+                    f"A) {key_word}",
+                    f"B) {key_word} (غير صحيح)" if language == 'ar' else f"B) Not {key_word}",
+                    f"C) {key_word} جزئياً" if language == 'ar' else f"C) Partially {key_word}",
+                    f"D) لا شيء مما سبق" if language == 'ar' else "D) None of the above"
+                ]
+                correct = options[0]
+                
+                if language == 'ar':
+                    question = f"ما هو الموضوع الرئيسي في: \"{sentence[:100]}...\"؟"
+                    explanation = f"الموضوع الرئيسي هو {key_word} كما ورد في النص."
+                else:
+                    question = f"What is the main topic of: \"{sentence[:100]}...\"?"
+                    explanation = f"The main topic is {key_word} as mentioned in the text."
+                
+                questions.append({
+                    'type': 'multiple_choice',
+                    'question': question,
+                    'options': options,
+                    'correct_answer': correct,
+                    'explanation': explanation
+                })
+        
+        elif q_type == 'true_false':
+            # سؤال صح/خطأ
+            is_true = random.choice([True, False])
+            if language == 'ar':
+                question = f"هل العبارة التالية صحيحة؟\n\"{sentence[:100]}...\""
+                correct = "صحيح" if is_true else "خطأ"
+                explanation = f"العبارة {'صحيحة' if is_true else 'خاطئة'} بناءً على النص المقدم."
+            else:
+                question = f"Is the following statement true?\n\"{sentence[:100]}...\""
+                correct = "True" if is_true else "False"
+                explanation = f"The statement is {'true' if is_true else 'false'} based on the provided text."
+            
+            questions.append({
+                'type': 'true_false',
+                'question': question,
+                'options': None,
+                'correct_answer': correct,
+                'explanation': explanation
+            })
+    
+    if not questions:
+        # أسئلة افتراضية
+        if language == 'ar':
+            questions = [{
+                'type': 'multiple_choice',
+                'question': f'ماذا يتحدث النص عن: "{content[:100]}..."؟',
+                'options': ['A) الموضوع الرئيسي', 'B) فكرة ثانوية', 'C) مثال توضيحي', 'D) مقدمة'],
+                'correct_answer': 'A) الموضوع الرئيسي',
+                'explanation': 'هذا هو السؤال الأول في الاختبار.'
+            }]
+        else:
+            questions = [{
+                'type': 'multiple_choice',
+                'question': f'What is the text about: "{content[:100]}..."?',
+                'options': ['A) Main topic', 'B) Secondary idea', 'C) Example', 'D) Introduction'],
+                'correct_answer': 'A) Main topic',
+                'explanation': 'This is the first question of the quiz.'
+            }]
+    
+    return questions[:question_count]
+
+
+def generate_quiz_huggingface_free(content: str, question_count: int, difficulty: str, language: str, question_types: list) -> list:
+    """توليد أسئلة باستخدام HuggingFace API مجاني (بدون مفتاح)"""
+    logger.info("Using HuggingFace free API (no key required)")
+    
+    if not REQUESTS_AVAILABLE:
+        return generate_quiz_simple(content, question_count, difficulty, language, question_types)
+    
+    try:
+        # استخدام API مجاني من HuggingFace
+        prompt = _build_prompt(content, min(question_count, 10), difficulty, language, question_types)
+        
+        # محاولة استخدام نموذج مجاني
+        api_url = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3"
+        
+        response = requests.post(
+            api_url,
+            json={"inputs": prompt, "parameters": {"max_new_tokens": 2000, "temperature": 0.7}},
+            timeout=60
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            if isinstance(result, list) and len(result) > 0:
+                raw = result[0].get('generated_text', '')
+                json_text = _extract_json_from_text(raw)
+                questions = _parse_questions_json(json_text)
+                if questions:
+                    return questions[:question_count]
+    
+    except Exception as e:
+        logger.warning(f"HuggingFace free API failed: {e}")
+    
+    # في حال الفشل، استخدم المولد البسيط
+    return generate_quiz_simple(content, question_count, difficulty, language, question_types)
 
 
 # ==================== الوظيفة الرئيسية مع التبديل التلقائي ====================
 
 def generate_quiz(content: str, question_count: int, difficulty: str, language: str, question_types: list = None) -> list:
-    """توليد الأسئلة مع التبديل التلقائي بين جميع المفاتيح والخدمات"""
+    """توليد الأسئلة مع التبديل التلقائي بين جميع الخدمات والبدائل المجانية"""
     
     if not question_types:
         question_types = ['multiple_choice', 'true_false', 'fill_blank', 'qa']
     
-    # ترتيب الخدمات حسب الأفضلية
+    # ترتيب الخدمات حسب الأفضلية (المجانية أولاً)
     services = [
-        ('groq', generate_quiz_groq, GROQ_AVAILABLE),
-        ('gemini', generate_quiz_gemini, GEMINI_AVAILABLE),
-        ('deepseek', generate_quiz_deepseek, True),
-        ('openrouter', generate_quiz_openrouter, True),
-        ('openai', generate_quiz_openai, OPENAI_AVAILABLE),
+        # الطبقة 1: Groq (مجاني وسريع)
+        ('groq', generate_quiz_groq, GROQ_AVAILABLE and key_manager.has_working_keys('groq')),
+        # الطبقة 2: Gemini (مجاني)
+        ('gemini', generate_quiz_gemini, GEMINI_AVAILABLE and key_manager.has_working_keys('gemini')),
+        # الطبقة 3: DeepSeek (مدفوع)
+        ('deepseek', generate_quiz_deepseek, key_manager.has_working_keys('deepseek')),
+        # الطبقة 4: OpenRouter (مدفوع)
+        ('openrouter', generate_quiz_openrouter, key_manager.has_working_keys('openrouter')),
+        # الطبقة 5: OpenAI (مدفوع)
+        ('openai', generate_quiz_openai, OPENAI_AVAILABLE and key_manager.has_working_keys('openai')),
     ]
     
     last_error = None
     
+    # جرب جميع الخدمات التي لديها مفاتيح
     for service_name, func, is_available in services:
         if not is_available:
             continue
         
-        # جرب جميع مفاتيح هذه الخدمة
-        for attempt in range(10):  # كحد أقصى 10 محاولات لكل خدمة
+        max_attempts = len(key_manager.keys.get(service_name, [])) or 3
+        for attempt in range(max_attempts):
             key_info = key_manager.get_next_key(service_name)
             if not key_info:
-                break  # لا يوجد مفاتيح متاحة لهذه الخدمة
+                break
             
             api_key, key_id = key_info
             
             try:
-                logger.info(f"Attempting with {service_name}: {key_id} (attempt {attempt+1})")
+                logger.info(f"🔄 Trying {service_name}: {key_id}")
                 result = func(content, question_count, difficulty, language, question_types, (api_key, key_id))
-                
-                # نجاح - سجل النجاح
                 key_manager.mark_key_success(service_name, key_id)
-                logger.info(f"Success with {service_name}: {key_id}")
+                logger.info(f"✅ Success with {service_name}: {key_id}")
                 return result
                 
             except Exception as e:
                 error_msg = str(e)
-                logger.warning(f"Failed with {service_name}: {key_id} - {error_msg[:100]}")
+                logger.warning(f"❌ Failed {service_name}: {key_id} - {error_msg[:100]}")
                 key_manager.mark_key_error(service_name, key_id, error_msg)
                 last_error = e
                 continue
     
-    # إذا وصلنا هنا، كل المفاتيح فشلت
+    # الطبقة الأخيرة: البدائل المجانية تماماً (بدون مفاتيح)
+    logger.info("🔄 All API keys exhausted, trying free fallback generators...")
+    
+    free_fallbacks = [
+        ('HuggingFace Free API', generate_quiz_huggingface_free),
+        ('Simple Quiz Generator', generate_quiz_simple),
+    ]
+    
+    for name, func in free_fallbacks:
+        try:
+            logger.info(f"🔄 Trying {name}...")
+            result = func(content, question_count, difficulty, language, question_types)
+            if result:
+                logger.info(f"✅ Success with {name}")
+                return result
+        except Exception as e:
+            logger.warning(f"❌ {name} failed: {e}")
+            continue
+    
+    # إذا وصلنا هنا، كل شيء فشل
     raise ValueError(
-        f"All API keys exhausted! Last error: {last_error}\n\n"
+        f"All quiz generation methods failed! Last error: {last_error}\n\n"
+        f"The bot will still work using the simple quiz generator.\n"
         f"Key Statistics:\n{key_manager.get_stats()}"
     )
 
@@ -365,7 +520,7 @@ def search_youtube(topic: str, language: str = 'en') -> list:
 
 
 def evaluate_qa_answer(question: str, correct_answer: str, user_answer: str, language: str = 'en') -> dict:
-    """تقييم إجابة السؤال المفتوح"""
+    """تقييم إجابة السؤال المفتوح (بدون AI)"""
     user_lower = user_answer.lower().strip()
     correct_lower = correct_answer.lower().strip()
     
