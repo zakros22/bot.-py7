@@ -1,12 +1,13 @@
 import os
 import logging
+import random
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 class APIKeyManager:
-    """مدير المفاتيح المتعددة - يدعم المفاتيح المفصولة بفواصل"""
+    """مدير المفاتيح المتعددة - يدعم المفاتيح المفصولة بفواصل والبدائل المجانية"""
     
     def __init__(self):
         self.keys: Dict[str, List[Dict]] = {
@@ -17,12 +18,12 @@ class APIKeyManager:
             'openrouter': []
         }
         self.current_keys: Dict[str, int] = {}
+        self.free_fallbacks = ['simple_quiz', 'huggingface_free']
         self.load_keys_from_env()
     
     def load_keys_from_env(self):
-        """تحميل المفاتيح من متغيرات البيئة (تدعم الفواصل)"""
+        """تحميل المفاتيح من متغيرات البيئة"""
         
-        # قائمة المتغيرات التي قد تحتوي على مفاتيح متعددة مفصولة بفواصل
         key_vars = {
             'openai': ['OPENAI_API_KEYS', 'OPENAI_API_KEY'],
             'gemini': ['GEMINI_API_KEYS', 'GEMINI_API_KEY'],
@@ -37,19 +38,19 @@ class APIKeyManager:
             for var_name in var_names:
                 value = os.environ.get(var_name, "")
                 if value:
-                    # تقسيم النص على الفواصل
                     parts = value.split(',')
                     for part in parts:
                         key = part.strip()
-                        if key and len(key) > 10:  # التأكد أن المفتاح صالح
+                        if key and len(key) > 5:
                             all_keys.append(key)
             
-            # إضافة المفاتيح إلى القائمة
             for idx, key in enumerate(all_keys):
                 self.add_key(service, key, f"{service}_{idx+1}")
             
             if all_keys:
                 logger.info(f"Loaded {len(all_keys)} keys for {service}")
+            else:
+                logger.info(f"No keys for {service}, will use free fallback if needed")
     
     def add_key(self, service: str, api_key: str, key_id: str):
         """إضافة مفتاح جديد"""
@@ -96,8 +97,6 @@ class APIKeyManager:
                 if key_info['error_count'] >= 3:
                     key_info['is_active'] = False
                     logger.warning(f"Deactivating {service} key: {key_id} after 3 errors")
-                else:
-                    logger.warning(f"Error on {service} key {key_id} (attempt {key_info['error_count']}/3)")
                 break
     
     def mark_key_success(self, service: str, key_id: str):
@@ -105,9 +104,12 @@ class APIKeyManager:
         for key_info in self.keys.get(service, []):
             if key_info['id'] == key_id:
                 key_info['error_count'] = 0
-                key_info['last_error'] = None
                 key_info['is_active'] = True
                 break
+    
+    def has_working_keys(self, service: str) -> bool:
+        """هل توجد مفاتيح فعالة لهذه الخدمة"""
+        return any(k['is_active'] for k in self.keys.get(service, []))
     
     def get_stats(self) -> Dict:
         """الحصول على إحصائيات"""
@@ -128,14 +130,6 @@ class APIKeyManager:
                 ]
             }
         return stats
-    
-    def get_any_available_service(self) -> Optional[str]:
-        """الحصول على أي خدمة متاحة"""
-        services_order = ['groq', 'gemini', 'deepseek', 'openrouter', 'openai']
-        for service in services_order:
-            if self.keys[service] and any(k['is_active'] for k in self.keys[service]):
-                return service
-        return None
 
 
 # إنشاء مدير عام
