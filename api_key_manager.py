@@ -48,7 +48,8 @@ class APIKeyManager:
             for idx, key in enumerate(all_keys):
                 self.add_key(service, key, f"{service}_{idx+1}")
             
-            logger.info(f"Loaded {len(all_keys)} keys for {service}")
+            if all_keys:
+                logger.info(f"Loaded {len(all_keys)} keys for {service}")
     
     def add_key(self, service: str, api_key: str, key_id: str):
         """إضافة مفتاح جديد"""
@@ -90,11 +91,13 @@ class APIKeyManager:
         for key_info in self.keys.get(service, []):
             if key_info['id'] == key_id:
                 key_info['error_count'] += 1
-                key_info['last_error'] = error_msg
+                key_info['last_error'] = error_msg[:200]
                 
                 if key_info['error_count'] >= 3:
                     key_info['is_active'] = False
-                    logger.warning(f"Deactivating {service} key: {key_id}")
+                    logger.warning(f"Deactivating {service} key: {key_id} after 3 errors")
+                else:
+                    logger.warning(f"Error on {service} key {key_id} (attempt {key_info['error_count']}/3)")
                 break
     
     def mark_key_success(self, service: str, key_id: str):
@@ -102,6 +105,7 @@ class APIKeyManager:
         for key_info in self.keys.get(service, []):
             if key_info['id'] == key_id:
                 key_info['error_count'] = 0
+                key_info['last_error'] = None
                 key_info['is_active'] = True
                 break
     
@@ -112,9 +116,27 @@ class APIKeyManager:
             stats[service] = {
                 'total': len(keys),
                 'active': sum(1 for k in keys if k['is_active']),
-                'total_usage': sum(k['usage_count'] for k in keys)
+                'total_usage': sum(k['usage_count'] for k in keys),
+                'keys': [
+                    {
+                        'id': k['id'],
+                        'usage': k['usage_count'],
+                        'errors': k['error_count'],
+                        'active': k['is_active']
+                    }
+                    for k in keys
+                ]
             }
         return stats
+    
+    def get_any_available_service(self) -> Optional[str]:
+        """الحصول على أي خدمة متاحة"""
+        services_order = ['groq', 'gemini', 'deepseek', 'openrouter', 'openai']
+        for service in services_order:
+            if self.keys[service] and any(k['is_active'] for k in self.keys[service]):
+                return service
+        return None
 
 
+# إنشاء مدير عام
 key_manager = APIKeyManager()
