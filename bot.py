@@ -10,7 +10,6 @@ import base64
 import random
 import re
 import sys
-import signal
 import time
 import subprocess
 from datetime import datetime
@@ -22,14 +21,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("BOT_TOKEN")
-HEROKU_APP_NAME = os.environ.get("HEROKU_APP_NAME")  # اسم التطبيق على Heroku
+HEROKU_APP_NAME = os.environ.get("HEROKU_APP_NAME")
+HEROKU_API_KEY = os.environ.get("HEROKU_API_KEY")
 
 # حالات المحادثة
 CHOOSING_ACTION, CHOOSING_AUDIO_GENDER, WAITING_FOR_TEXT_AUDIO, WAITING_FOR_TEXT_IMAGE, WAITING_FOR_EXPLAIN = range(5)
 
 # تخزين بيانات المستخدمين
 user_choices = {}
-user_pending_images = {}  # تخزين الطلبات المعلقة
+user_pending_requests = {}  # تخزين الطلبات المعلقة
 
 # ========== مفاتيح API من Heroku ==========
 DEEPSEEK_KEYS = []
@@ -57,114 +57,206 @@ key_states = {
     'openrouter': {'keys': OPENROUTER_KEYS, 'current_index': 0, 'failed_keys': set()}
 }
 
-# إعدادات المحاولات
-MAX_RETRIES = 3  # عدد المحاولات قبل إعادة تشغيل الـ Dyno
-
 # ========== وظيفة إعادة تشغيل Heroku Dyno ==========
 def restart_heroku_dyno():
-    """إعادة تشغيل الـ Dyno على Heroku تلقائياً"""
+    """إعادة تشغيل الـ Dyno على Heroku"""
     try:
         if HEROKU_APP_NAME:
-            logger.warning(f"🔄 جاري إعادة تشغيل Dyno للتطبيق {HEROKU_APP_NAME}...")
-            # استخدام Heroku API لإعادة التشغيل
-            heroku_api_key = os.environ.get("HEROKU_API_KEY")
-            if heroku_api_key:
+            logger.info(f"🔄 جاري إعادة تشغيل Dyno: {HEROKU_APP_NAME}")
+            
+            # طريقة 1: استخدام Heroku API
+            if HEROKU_API_KEY:
                 import requests
                 headers = {
-                    "Authorization": f"Bearer {heroku_api_key}",
-                    "Accept": "application/vnd.heroku+json; version=3"
+                    "Authorization": f"Bearer {HEROKU_API_KEY}",
+                    "Accept": "application/vnd.heroku+json; version=3",
+                    "Content-Type": "application/json"
                 }
                 url = f"https://api.heroku.com/apps/{HEROKU_APP_NAME}/dynos"
                 response = requests.delete(url, headers=headers)
-                if response.status_code == 202:
-                    logger.info("✅ تم إعادة تشغيل الـ Dyno بنجاح")
+                if response.status_code in [200, 202]:
+                    logger.info("✅ تم إعادة تشغيل الـ Dyno عبر API")
                     return True
                 else:
-                    logger.error(f"فشل إعادة التشغيل: {response.status_code}")
-            else:
-                # بديل: استخدام CLI command
-                subprocess.run(["heroku", "restart", "-a", HEROKU_APP_NAME], capture_output=True)
-                logger.info("✅ تم إعادة تشغيل الـ Dyno عبر CLI")
+                    logger.error(f"فشل API: {response.status_code}")
+            
+            # طريقة 2: استخدام CLI
+            try:
+                result = subprocess.run(
+                    ["heroku", "restart", "-a", HEROKU_APP_NAME],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0:
+                    logger.info("✅ تم إعادة تشغيل الـ Dyno عبر CLI")
+                    return True
+            except:
+                pass
+            
+            # طريقة 3: استخدام Scale (إيقاف ثم تشغيل)
+            try:
+                subprocess.run(
+                    ["heroku", "ps:scale", "worker=0", "-a", HEROKU_APP_NAME],
+                    capture_output=True, timeout=10
+                )
+                time.sleep(2)
+                subprocess.run(
+                    ["heroku", "ps:scale", "worker=1", "-a", HEROKU_APP_NAME],
+                    capture_output=True, timeout=10
+                )
+                logger.info("✅ تم إعادة تشغيل الـ Dyno عبر Scale")
                 return True
+            except:
+                pass
+        
         return False
     except Exception as e:
         logger.error(f"خطأ في إعادة التشغيل: {e}")
         return False
 
-# ========== مواقع توليد الصور ==========
-async def image_pollinations(prompt: str, seed: int):
-    """Pollinations API"""
-    try:
-        clean_prompt = prompt.strip().replace(" ", "%20")
-        encoded_prompt = urllib.parse.quote(f"{clean_prompt}, cartoon style, colorful, high quality")
-        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=512&height=512&nologo=true&seed={seed}"
-        
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=30) as response:
-            image_data = response.read()
-            if len(image_data) > 1000:
-                return image_data
-        return None
-    except Exception as e:
-        logger.error(f"Pollinations error: {e}")
-        return None
-
-async def image_craiyon(prompt: str):
-    """Craiyon API"""
+# ========== وظيفة توليد الصورة مع إعادة تشغيل مسبق ==========
+async def generate_image_with_prerestart(prompt: str, update: Update, user_id: int, attempt: int = 0):
+    """توليد صورة مع إعادة تشغيل الـ Dyno قبل المحاولة"""
+    
+    MAX_ATTEMPTS = 3
+    
+    # إرسال رسالة للمستخدم
+    if attempt == 0:
+        await update.message.reply_text(
+            f"🎨 **جاري تحضير النظام لتوليد الصورة...**\n\n"
+            f"📝 {prompt[:150]}\n\n"
+            f"🔄 سيتم إعادة تشغيل الخادم أولاً لضمان عمل أفضل\n"
+            f"⏱ سيستغرق هذا 5-10 ثواني"
+        )
+    
+    # إعادة تشغيل الـ Dyno قبل المحاولة
+    await update.message.reply_text(f"🔄 **إعادة تشغيل الخادم... (المحاولة {attempt + 1}/{MAX_ATTEMPTS})**")
+    
+    restart_success = restart_heroku_dyno()
+    
+    if restart_success:
+        await update.message.reply_text("✅ **تم إعادة تشغيل الخادم بنجاح!**\n\n🎨 جاري توليد الصورة...")
+    else:
+        await update.message.reply_text("⚠️ **جاري توليد الصورة بدون إعادة تشغيل...**")
+    
+    # انتظار قليل بعد إعادة التشغيل
+    await asyncio.sleep(3)
+    
+    # محاولة توليد الصورة
+    image_data = None
+    success = False
+    
+    # محاولة Pollinations
+    for retry in range(2):
+        try:
+            clean_prompt = prompt.strip().replace(" ", "%20")
+            encoded_prompt = urllib.parse.quote(f"{clean_prompt}, cartoon style, colorful, high quality")
+            random_seed = random.randint(1, 1000000) + attempt * 10000
+            url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=512&height=512&nologo=true&seed={random_seed}"
+            
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=30) as response:
+                image_data = response.read()
+                if len(image_data) > 1000:
+                    success = True
+                    break
+        except Exception as e:
+            logger.error(f"Pollinations error: {e}")
+            if retry == 0:
+                await asyncio.sleep(2)
+    
+    if success and image_data:
+        image_file = io.BytesIO(image_data)
+        image_file.name = "generated_image.png"
+        await update.message.reply_photo(
+            photo=image_file,
+            caption=f"🎨 **تم توليد الصورة بنجاح!**\n\n📝 {prompt[:150]}..."
+        )
+        await update.message.reply_text("✅ تم توليد الصورة بنجاح!")
+        return True
+    
+    # إذا فشلت المحاولة ولم نصل للحد الأقصى
+    if attempt + 1 < MAX_ATTEMPTS:
+        await update.message.reply_text(
+            f"⚠️ **المحاولة {attempt + 1} فشلت**\n\n"
+            f"🔄 جاري إعادة التشغيل والمحاولة مرة أخرى...\n"
+            f"📝 الطلب: {prompt[:100]}..."
+        )
+        # حفظ الطلب لإعادة المحاولة
+        user_pending_requests[user_id] = {
+            'prompt': prompt,
+            'attempt': attempt + 1,
+            'chat_id': update.effective_chat.id
+        }
+        return await generate_image_with_prerestart(prompt, update, user_id, attempt + 1)
+    
+    # إذا فشلت كل المحاولات، جرب البدائل
+    await update.message.reply_text("⚠️ **Pollinations غير متاح، أجرب مواقع بديلة...**")
+    
+    # بديل 1: Craiyon
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post("https://backend.craiyon.com/generate", json={"prompt": f"cartoon, {prompt}"}, timeout=25) as resp:
+            async with session.post("https://backend.craiyon.com/generate", json={"prompt": f"cartoon, {prompt}"}, timeout=30) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     images = data.get('images', [])
                     if images and len(images) > 0:
-                        return base64.b64decode(images[0])
-        return None
+                        image_data = base64.b64decode(images[0])
+                        success = True
     except:
-        return None
-
-async def image_lexica(prompt: str):
-    """Lexica API"""
-    try:
-        encoded_prompt = urllib.parse.quote(prompt)
-        url = f"https://lexica.art/api/v1/search?q={encoded_prompt}"
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=15) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    images = data.get('images', [])
-                    if images and len(images) > 0:
-                        image_url = images[0].get('src')
+        pass
+    
+    # بديل 2: Lexica
+    if not success:
+        try:
+            encoded_prompt = urllib.parse.quote(prompt)
+            url = f"https://lexica.art/api/v1/search?q={encoded_prompt}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=15) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        images = data.get('images', [])
+                        if images and len(images) > 0:
+                            image_url = images[0].get('src')
+                            if image_url:
+                                async with session.get(image_url) as img_resp:
+                                    image_data = await img_resp.read()
+                                    success = True
+        except:
+            pass
+    
+    # بديل 3: DeepAI
+    if not success:
+        try:
+            url = "https://api.deepai.org/api/text2img"
+            data = aiohttp.FormData()
+            data.add_field('text', f"cartoon style, {prompt}")
+            headers = {'api-key': 'quickstart-QUdJIGlzIGNvbWluZy4uLi4K'}
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, data=data, headers=headers, timeout=25) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        image_url = result.get('output_url')
                         if image_url:
                             async with session.get(image_url) as img_resp:
-                                return await img_resp.read()
-        return None
-    except:
-        return None
-
-async def image_deepai(prompt: str):
-    """DeepAI API"""
-    try:
-        url = "https://api.deepai.org/api/text2img"
-        data = aiohttp.FormData()
-        data.add_field('text', f"cartoon style, {prompt}")
-        headers = {'api-key': 'quickstart-QUdJIGlzIGNvbWluZy4uLi4K'}
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=data, headers=headers, timeout=25) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    image_url = result.get('output_url')
-                    if image_url:
-                        async with session.get(image_url) as img_resp:
-                            return await img_resp.read()
-        return None
-    except:
-        return None
+                                image_data = await img_resp.read()
+                                success = True
+        except:
+            pass
+    
+    if success and image_data:
+        image_file = io.BytesIO(image_data)
+        image_file.name = "backup_image.png"
+        await update.message.reply_photo(
+            photo=image_file,
+            caption=f"🎨 **تم توليد الصورة من موقع بديل!**\n\n📝 {prompt[:150]}..."
+        )
+        return True
+    
+    # الحل الأخير: رسم صورة محلية
+    return await image_local_fallback(prompt, update)
 
 async def image_local_fallback(prompt: str, update: Update):
-    """رسم صورة محلية (الحل النهائي)"""
+    """رسم صورة محلية"""
     try:
         from PIL import Image, ImageDraw, ImageFont
         
@@ -195,106 +287,16 @@ async def image_local_fallback(prompt: str, update: Update):
         )
         return True
     except:
+        await update.message.reply_text("❌ عذراً، جميع خدمات الصور غير متاحة. حاول مرة أخرى.")
         return False
-
-# ========== وظيفة توليد الصور مع إعادة تشغيل تلقائي ==========
-async def generate_image_with_auto_restart(prompt: str, update: Update, user_id: int, attempt: int = 0):
-    """توليد صورة مع إعادة تشغيل تلقائي للـ Dyno إذا فشل"""
-    
-    processing_msg = await update.message.reply_text(
-        f"🎨 **جاري توليد صورة...**\n\n"
-        f"📝 {prompt[:150]}\n\n"
-        f"🔄 المحاولة {attempt + 1}/{MAX_RETRIES}"
-    )
-    
-    image_data = None
-    success = False
-    
-    # محاولة Pollinations
-    try:
-        random_seed = random.randint(1, 1000000)
-        image_data = await image_pollinations(prompt, random_seed)
-        if image_data:
-            success = True
-    except Exception as e:
-        logger.error(f"محاولة {attempt + 1} فشلت: {e}")
-    
-    await processing_msg.delete()
-    
-    if success and image_data:
-        image_file = io.BytesIO(image_data)
-        image_file.name = "generated_image.png"
-        await update.message.reply_photo(
-            photo=image_file,
-            caption=f"🎨 **تم توليد الصورة بنجاح!**\n\n📝 {prompt[:150]}..."
-        )
-        await update.message.reply_text("✅ تم توليد الصورة بنجاح!")
-        return True
-    
-    # إذا فشلت المحاولة ولم نصل للحد الأقصى
-    if attempt + 1 < MAX_RETRIES:
-        await update.message.reply_text(
-            f"⚠️ **المحاولة {attempt + 1} فشلت**\n\n"
-            f"🔄 جاري إعادة التشغيل التلقائي والمحاولة مرة أخرى...\n"
-            f"📝 سيتم حفظ طلبك واستئنافه بعد إعادة التشغيل"
-        )
-        
-        # حفظ الطلب لإعادة المحاولة بعد إعادة التشغيل
-        user_pending_images[user_id] = {
-            'prompt': prompt,
-            'attempt': attempt + 1,
-            'chat_id': update.effective_chat.id
-        }
-        
-        # إعادة تشغيل الـ Dyno
-        restart_heroku_dyno()
-        
-        # انتظار إعادة التشغيل
-        await asyncio.sleep(5)
-        
-        # محاولة مرة أخرى بعد إعادة التشغيل
-        return await generate_image_with_auto_restart(prompt, update, user_id, attempt + 1)
-    
-    # إذا فشلت كل المحاولات، جرب البدائل
-    await update.message.reply_text("⚠️ **Pollinations غير متاح، أجرب مواقع بديلة...**")
-    
-    # Craiyon
-    image_data = await image_craiyon(prompt)
-    if image_data:
-        success = True
-    
-    # Lexica
-    if not success:
-        image_data = await image_lexica(prompt)
-        if image_data:
-            success = True
-    
-    # DeepAI
-    if not success:
-        image_data = await image_deepai(prompt)
-        if image_data:
-            success = True
-    
-    if success and image_data:
-        image_file = io.BytesIO(image_data)
-        image_file.name = "generated_image.png"
-        await update.message.reply_photo(
-            photo=image_file,
-            caption=f"🎨 **تم توليد الصورة من موقع بديل!**\n\n📝 {prompt[:150]}..."
-        )
-        return True
-    
-    # الحل الأخير: رسم محلي
-    return await image_local_fallback(prompt, update)
 
 # ========== تقسيم النص الطويل ==========
 async def generate_images_for_long_text(text: str, update: Update, user_id: int):
-    """تقسيم النص الطويل إلى أجزاء وتوليد صورة لكل جزء"""
+    """تقسيم النص الطويل إلى أجزاء"""
     
     sentences = re.split(r'[.!?؟]\s+', text)
     
     if len(sentences) > 3 or len(text) > 300:
-        # تقسيم إلى 3 أجزاء كحد أقصى
         chunk_size = max(2, len(sentences) // 3)
         parts = []
         for i in range(0, len(sentences), chunk_size):
@@ -306,17 +308,18 @@ async def generate_images_for_long_text(text: str, update: Update, user_id: int)
         
         await update.message.reply_text(
             f"📝 **نص طويل!** سأقوم بتقسيمه إلى {len(parts)} أجزاء\n"
-            f"🖼 سأقوم بتوليد صورة لكل جزء"
+            f"🖼 سأقوم بتوليد صورة لكل جزء\n"
+            f"🔄 سيتم إعادة تشغيل الخادم قبل كل صورة"
         )
         
         for idx, part in enumerate(parts, 1):
             await update.message.reply_text(f"🎨 **جاري توليد الصورة {idx}/{len(parts)}...**")
-            await generate_image_with_auto_restart(part, update, user_id, 0)
-            await asyncio.sleep(2)
+            await generate_image_with_prerestart(part, update, user_id, 0)
+            await asyncio.sleep(3)
         
         return True
     else:
-        return await generate_image_with_auto_restart(text, update, user_id, 0)
+        return await generate_image_with_prerestart(text, update, user_id, 0)
 
 # ========== شرح النص باستخدام المفاتيح ==========
 
@@ -428,11 +431,9 @@ async def call_openrouter(prompt: str, update: Update, processing_msg):
     return False
 
 async def explain_local(text: str, update: Update):
-    """شرح محلي (البديل النهائي)"""
     words = text.split()
     sentences = re.split(r'[.!?؟]+', text)
     sentences = [s for s in sentences if s.strip()]
-    
     has_arabic = any('\u0600' <= c <= '\u06FF' for c in text)
     
     explanation = f"""
@@ -460,8 +461,6 @@ async def explain_local(text: str, update: Update):
     return True
 
 async def explain_text_full(text: str, update: Update):
-    """شرح النص باستخدام المفاتيح"""
-    
     processing_msg = await update.message.reply_text("📖 **جاري تحليل وشرح النص...**")
     
     success = False
@@ -538,15 +537,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✨ **مرحباً بك في البوت المتكامل!** ✨\n\n"
         f"🎨 **توليد صورة:**\n"
-        f"   • {MAX_RETRIES} محاولات لـ Pollinations\n"
-        f"   • إذا فشل → إعادة تشغيل تلقائي للـ Dyno\n"
-        f"   • تقسيم النصوص الطويلة إلى صور متعددة\n\n"
+        f"   • قبل كل صورة → إعادة تشغيل الخادم تلقائياً\n"
+        f"   • 3 محاولات مع إعادة تشغيل قبل كل محاولة\n"
+        f"   • النصوص الطويلة تقسم إلى صور متعددة\n\n"
         f"🎵 **تحويل نص إلى صوت:** 3 محاولات\n\n"
         f"📖 **شرح وتحليل النص:**\n"
         f"   • DeepSeek ({len(DEEPSEEK_KEYS)} مفتاح)\n"
         f"   • Gemini ({len(GEMINI_KEYS)} مفتاح)\n"
-        f"   • OpenRouter ({len(OPENROUTER_KEYS)} مفتاح)\n"
-        f"   • بديل محلي يعمل دائماً\n\n"
+        f"   • OpenRouter ({len(OPENROUTER_KEYS)} مفتاح)\n\n"
         f"🔽 **اختر ما تريد:**",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -571,8 +569,8 @@ async def action_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "🎨 **توليد صورة من النص**\n\n"
             "✏️ **أرسل وصف الصورة:**\n\n"
-            f"✅ {MAX_RETRIES} محاولات لـ Pollinations\n"
-            f"✅ إذا فشل → إعادة تشغيل تلقائي\n"
+            f"✅ قبل كل صورة → إعادة تشغيل الخادم تلقائياً\n"
+            f"✅ 3 محاولات مع إعادة تشغيل قبل كل محاولة\n"
             f"✅ النصوص الطويلة تقسم إلى صور متعددة\n\n"
             "📝 أمثلة:\n"
             "• ولد في حديقة مع زهور\n"
@@ -662,19 +660,16 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== إعادة التشغيل التلقائي ==========
 def restart_bot():
-    """إعادة تشغيل البوت تلقائياً"""
     logger.warning("⚠️ جاري إعادة تشغيل البوت...")
     time.sleep(2)
     os.execl(sys.executable, sys.executable, *sys.argv)
 
 def signal_handler(signum, frame):
-    """معالج إشارات لإعادة التشغيل"""
     logger.warning(f"⚠️ استقبل إشارة {signum}، جاري إعادة التشغيل...")
     restart_bot()
 
 # ========== التشغيل ==========
 def main():
-    # تسجيل معالج الإشارات
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
     
@@ -695,9 +690,9 @@ def main():
     app.add_handler(conv_handler)
     
     print("=" * 60)
-    print("✅ البوت يعمل مع إعادة التشغيل التلقائي للـ Dyno!")
-    print(f"📊 Pollinations: {MAX_RETRIES} محاولات ثم إعادة تشغيل")
-    print(f"📊 تقسيم النصوص الطويلة إلى صور متعددة")
+    print("✅ البوت يعمل مع إعادة تشغيل تلقائي قبل كل صورة!")
+    print(f"📊 قبل كل صورة → إعادة تشغيل الـ Dyno")
+    print(f"📊 3 محاولات مع إعادة تشغيل قبل كل محاولة")
     print(f"📊 DeepSeek Keys: {len(DEEPSEEK_KEYS)}")
     print(f"📊 Gemini Keys: {len(GEMINI_KEYS)}")
     print(f"📊 OpenRouter Keys: {len(OPENROUTER_KEYS)}")
