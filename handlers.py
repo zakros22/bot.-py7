@@ -1155,29 +1155,3 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
             await update.effective_message.reply_text(msg)
         except Exception:
             pass
-
-async def cmd_key_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض إحصائيات المفاتيح (للأدمن فقط)"""
-    if update.effective_user.id != ADMIN_ID:
-        return
-    
-    from api_key_manager import key_manager
-    stats = key_manager.get_stats()
-    
-    msg = "🔑 *إحصائيات مفاتيح API*\n\n"
-    for service, data in stats.items():
-        msg += f"*{service.upper()}:*\n"
-        msg += f"  📊 المجموع: {data['total']}\n"
-        msg += f"  ✅ النشطة: {data['active']}\n"
-        msg += f"  🔄 الاستخدام الكلي: {data['total_usage']}\n"
-        msg += f"  📝 التفاصيل:\n"
-        for k in data['keys']:
-            status = "✅" if k['active'] else "❌"
-            msg += f"    {status} {k['id']}: استخدام {k['usage']} | أخطاء {k['errors']}\n"
-        msg += "\n"
-    
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
-
-
-# سجل الأمر في bot.py
-app.add_handler(CommandHandler("keystats", cmd_key_stats))
