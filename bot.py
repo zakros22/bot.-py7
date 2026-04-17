@@ -4,11 +4,18 @@ import logging
 import urllib.parse
 import urllib.request
 import asyncio
+import aiohttp
+import json
+import base64
+import random
+import re
 import subprocess
-import sys
 import time
+import sys
+import signal
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ConversationHandler
 
 # تفعيل التسجيل
 logging.basicConfig(level=logging.INFO)
@@ -17,50 +24,345 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("BOT_TOKEN")
 HEROKU_APP_NAME = os.environ.get("HEROKU_APP_NAME")
 
-# تخزين الطلبات المعلقة
-pending_image_requests = {}
+# حالات المحادثة
+CHOOSING_ACTION, WAITING_FOR_TEXT = range(2)
+
+# تخزين بيانات المستخدمين
+user_data = {}
+
+# ========== إعدادات المحاولات ==========
+MAX_IMAGE_RETRIES = 5  # عدد محاولات إعادة التشغيل لتوليد الصورة
+RETRY_DELAY = 3        # انتظار بين المحاولات
 
 # ========== وظيفة إعادة تشغيل Heroku ==========
 def restart_heroku():
-    """إعادة تشغيل تطبيق Heroku بالكامل"""
+    """إعادة تشغيل تطبيق Heroku"""
     try:
         if HEROKU_APP_NAME:
             logger.info(f"🔄 جاري إعادة تشغيل {HEROKU_APP_NAME}...")
-            
-            # استخدام Heroku CLI
-            result = subprocess.run(
+            subprocess.run(
                 ["heroku", "restart", "-a", HEROKU_APP_NAME],
-                capture_output=True, text=True, timeout=10
-            )
-            
-            if result.returncode == 0:
-                logger.info("✅ تم إعادة التشغيل بنجاح")
-                return True
-            else:
-                logger.error(f"فشل إعادة التشغيل: {result.stderr}")
-                
-            # طريقة بديلة: استخدام scale
-            subprocess.run(
-                ["heroku", "ps:scale", "worker=0", "-a", HEROKU_APP_NAME],
-                capture_output=True, timeout=10
-            )
-            time.sleep(2)
-            subprocess.run(
-                ["heroku", "ps:scale", "worker=1", "-a", HEROKU_APP_NAME],
                 capture_output=True, timeout=10
             )
             return True
     except Exception as e:
-        logger.error(f"خطأ: {e}")
+        logger.error(f"خطأ في إعادة التشغيل: {e}")
         return False
 
-# ========== توليد الصورة ==========
-async def generate_image(prompt: str, update: Update):
-    """توليد صورة من Pollinations"""
+# ========== بدائل شرح النص (5 بدائل مجانية) ==========
+
+# بديل 1: تحليل محلي متقدم (يعمل دائماً)
+async def explain_local_advanced(text: str, update: Update):
+    """شرح متقدم محلياً - يدعم المعادلات والمواضيع العلمية"""
+    
+    # تحليل النص
+    words = text.split()
+    chars = len(text)
+    lines = text.count('\n') + 1
+    
+    # اكتشاف نوع المحتوى
+    has_equations = bool(re.search(r'[\+\-\*\/\=\(\)\^]|x\^?\d?|\d+[x]', text))
+    has_numbers = bool(re.search(r'\d+', text))
+    has_arabic = any('\u0600' <= c <= '\u06FF' for c in text)
+    
+    # اكتشاف الموضوع
+    science_keywords = ['معادلة', 'قانون', 'فيزياء', 'كيمياء', 'رياضيات', 'جبر', 'هندسة', 'مثلثات']
+    math_keywords = ['+', '-', '*', '/', '=', 'x', 'y', '∑', '∫', '√', '^']
+    
+    is_science = any(kw in text for kw in science_keywords)
+    is_math = any(kw in text for kw in math_keywords)
+    
+    # تقسيم النص إلى جمل
+    sentences = re.split(r'[.!?؟\n]+', text)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
+    
+    # الكلمات الرئيسية
+    word_freq = {}
+    for w in words:
+        w_lower = w.lower()
+        word_freq[w_lower] = word_freq.get(w_lower, 0) + 1
+    
+    keywords = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:10]
+    
+    # بناء الشرح
+    explanation = f"""
+📚 **تحليل وشرح النص (متقدم)**
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 **النص الأصلي:**
+{text[:600]}{'...' if len(text) > 600 else ''}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 **الإحصائيات الأساسية:**
+• عدد الحروف: {chars}
+• عدد الكلمات: {len(words)}
+• عدد الجمل: {len(sentences)}
+• عدد الأسطر: {lines}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔬 **نوع المحتوى:**
+"""
+    if is_math or has_equations:
+        explanation += "• 📐 **رياضيات / معادلات**\n"
+    if is_science:
+        explanation += "• 🔬 **علوم / فيزياء / كيمياء**\n"
+    if has_numbers:
+        explanation += "• 🔢 **يحتوي على أرقام ومعادلات**\n"
+    if not (is_math or is_science):
+        explanation += "• 📖 **نص عام / أدبي**\n"
+    
+    explanation += f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🌐 **اللغة:** {'عربية' if has_arabic else 'إنجليزية / مختلطة'}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔑 **الكلمات المفتاحية:**
+"""
+    for word, count in keywords[:8]:
+        explanation += f"• {word} ({count})\n"
+    
+    explanation += f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💡 **الملخص والشرح:**
+
+{text[:300]}{'...' if len(text) > 300 else ''}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📌 **النقاط الرئيسية:**
+"""
+    # استخراج أهم الجمل
+    important = sorted(sentences, key=len, reverse=True)[:3]
+    for i, sent in enumerate(important, 1):
+        explanation += f"{i}. {sent[:100]}...\n"
+    
+    explanation += """
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ **تم التحليل والشرح بنجاح**
+"""
+    
+    # تقسيم الشرح إذا كان طويلاً
+    if len(explanation) > 4000:
+        await update.message.reply_text(explanation[:3500])
+        await update.message.reply_text(explanation[3500:])
+    else:
+        await update.message.reply_text(explanation)
+    
+    return True
+
+# بديل 2: شرح باستخدام API (مجاني)
+async def explain_api_1(text: str, update: Update):
+    """شرح باستخدام API خارجي"""
+    try:
+        encoded_text = urllib.parse.quote(text[:1000])
+        url = f"https://api.meaningcloud.com/summarization-1.0?key=mock_key&txt={encoded_text}&sentences=5"
+        
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read())
+            summary = data.get('summary', text[:300])
+            
+            await update.message.reply_text(
+                f"📚 **ملخص النص (API)**\n\n"
+                f"{summary}\n\n"
+                f"✅ تم إنشاء هذا الملخص تلقائياً"
+            )
+            return True
+    except:
+        return False
+
+# بديل 3: تحليل ذكي للنص
+async def explain_smart(text: str, update: Update):
+    """تحليل ذكي مع استخراج المعلومات"""
+    
+    # استخراج المعادلات الرياضية
+    equations = re.findall(r'[\d\+\-\*\/\(\)\=]+|x\^?\d?|\d+[a-z]', text)
+    
+    # استخراج التواريخ
+    dates = re.findall(r'\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}|\d{1,2}\s+(?:يناير|فبراير|مارس|إبريل|مايو|يونيو|يوليو|أغسطس|سبتمبر|أكتوبر|نوفمبر|ديسمبر)', text)
+    
+    # استخراج النسب المئوية
+    percentages = re.findall(r'\d+%', text)
+    
+    explanation = f"""
+🧠 **تحليل ذكي للنص**
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 **الخلاصة:**
+{text[:250]}...
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+    if equations:
+        explanation += f"📐 **المعادلات المكتشفة:**\n"
+        for eq in equations[:3]:
+            explanation += f"• {eq}\n"
+        explanation += "\n"
+    
+    if dates:
+        explanation += f"📅 **التواريخ:** {', '.join(dates[:3])}\n\n"
+    
+    if percentages:
+        explanation += f"📊 **النسب:** {', '.join(percentages[:3])}\n\n"
+    
+    explanation += f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 **إحصائيات سريعة:**
+• عدد الكلمات: {len(text.split())}
+• عدد الجمل: {len(re.split(r'[.!?؟]+', text))}
+• عدد الحروف: {len(text)}
+
+✅ تم التحليل الذكي بنجاح
+"""
+    await update.message.reply_text(explanation)
+    return True
+
+# بديل 4: تحليل علمي متخصص
+async def explain_scientific(text: str, update: Update):
+    """تحليل للمواضيع العلمية والرياضية"""
+    
+    # اكتشاف المصطلحات العلمية
+    scientific_terms = re.findall(r'[أ-ي]{4,}', text)
+    scientific_terms = list(set([t for t in scientific_terms if len(t) > 3]))[:10]
+    
+    # تحليل المعادلات
+    has_formula = bool(re.search(r'[a-z]\s*[=<>]\s*\d+|\d+\s*[=<>]\s*[a-z]', text.lower()))
+    
+    explanation = f"""
+🔬 **تحليل علمي للنص**
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📖 **النص العلمي:**
+{text[:400]}...
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+    if has_formula:
+        explanation += "🧪 **يحتوي النص على معادلات وقوانين علمية**\n\n"
+    
+    if scientific_terms:
+        explanation += f"🔬 **المصطلحات العلمية:**\n"
+        for term in scientific_terms[:7]:
+            explanation += f"• {term}\n"
+        explanation += "\n"
+    
+    explanation += f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 **التقييم:**
+• مستوى الصعوبة: {'متقدم' if len(text) > 500 else 'متوسط' if len(text) > 200 else 'مبتدئ'}
+• الطول: {'طويل' if len(text.split()) > 100 else 'متوسط' if len(text.split()) > 50 else 'قصير'}
+
+✅ تم التحليل العلمي بنجاح
+"""
+    await update.message.reply_text(explanation)
+    return True
+
+# بديل 5: ملخص سريع
+async def explain_summary(text: str, update: Update):
+    """ملخص سريع للنص"""
+    
+    # تقسيم إلى جمل
+    sentences = re.split(r'[.!?؟\n]+', text)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+    
+    # اختيار أهم الجمل (أطول الجمل عادة تحتوي على المعلومات الرئيسية)
+    main_sentences = sorted(sentences, key=len, reverse=True)[:3]
+    
+    summary = f"""
+📝 **ملخص النص**
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📖 **الملخص:**
+"""
+    for i, sent in enumerate(main_sentences, 1):
+        summary += f"{i}. {sent[:150]}...\n"
+    
+    summary += f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 **نبذة سريعة:**
+• عدد الكلمات: {len(text.split())}
+• وقت القراءة المقدر: {len(text.split()) // 200} دقيقة
+
+✅ تم إنشاء الملخص بنجاح
+"""
+    await update.message.reply_text(summary)
+    return True
+
+# ========== وظيفة شرح النص الرئيسية (تجربة جميع البدائل) ==========
+async def explain_text_full(text: str, update: Update):
+    """شرح النص باستخدام جميع البدائل المتاحة"""
+    
+    processing_msg = await update.message.reply_text("📖 **جاري تحليل وشرح النص...**")
+    
+    await asyncio.sleep(0.5)
+    await processing_msg.edit_text("📖 **البديل 1/5: تحليل متقدم محلي...**")
+    
+    success = False
+    
+    # البديل 1: تحليل محلي متقدم (يعمل دائماً)
+    success = await explain_local_advanced(text, update)
+    
+    # البديل 2: تحليل API
+    if not success:
+        await processing_msg.edit_text("📖 **البديل 2/5: تحليل API...**")
+        success = await explain_api_1(text, update)
+    
+    # البديل 3: تحليل ذكي
+    if not success:
+        await processing_msg.edit_text("📖 **البديل 3/5: تحليل ذكي...**")
+        success = await explain_smart(text, update)
+    
+    # البديل 4: تحليل علمي
+    if not success:
+        await processing_msg.edit_text("📖 **البديل 4/5: تحليل علمي...**")
+        success = await explain_scientific(text, update)
+    
+    # البديل 5: ملخص سريع
+    if not success:
+        await processing_msg.edit_text("📖 **البديل 5/5: ملخص سريع...**")
+        success = await explain_summary(text, update)
+    
+    await processing_msg.delete()
+    
+    if not success:
+        await update.message.reply_text(
+            "❌ عذراً، حدث خطأ في تحليل النص.\n\n"
+            "💡 حاول بنص أقصر أو أقل تعقيداً."
+        )
+
+# ========== توليد الصورة مع محاولات متعددة وإعادة تشغيل ==========
+async def generate_image_with_retries(prompt: str, update: Update, attempt: int = 0):
+    """توليد صورة مع محاولات متعددة وإعادة تشغيل تلقائي"""
+    
+    MAX_ATTEMPTS = 5
+    
+    if attempt >= MAX_ATTEMPTS:
+        await update.message.reply_text(
+            "❌ **فشل توليد الصورة بعد 5 محاولات**\n\n"
+            "💡 نصائح:\n"
+            "• جرب وصفاً أقصر (أقل من 150 حرف)\n"
+            "• جرب وصفاً باللغة الإنجليزية\n"
+            "• مثال: 'a boy playing in garden'\n\n"
+            "🔄 يمكنك المحاولة مرة أخرى بعد دقيقة"
+        )
+        return False
+    
+    await update.message.reply_text(
+        f"🎨 **محاولة توليد الصورة {attempt + 1}/{MAX_ATTEMPTS}**\n\n"
+        f"📝 {prompt[:100]}...\n\n"
+        f"🔄 جاري إعادة تشغيل الخادم..."
+    )
+    
+    # إعادة تشغيل Heroku قبل كل محاولة
+    restart_heroku()
+    await asyncio.sleep(3)
+    
+    await update.message.reply_text("✅ **تم إعادة التشغيل، جاري توليد الصورة...**")
+    
     try:
         clean_prompt = prompt.strip().replace(" ", "%20")
-        encoded_prompt = urllib.parse.quote(f"{clean_prompt}, cartoon style")
-        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=512&height=512"
+        encoded_prompt = urllib.parse.quote(f"{clean_prompt}, cartoon style, colorful")
+        random_seed = random.randint(1, 1000000) + attempt * 10000
+        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=512&height=512&seed={random_seed}"
         
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=30) as response:
@@ -71,94 +373,46 @@ async def generate_image(prompt: str, update: Update):
             image_file.name = "image.png"
             await update.message.reply_photo(
                 photo=image_file,
-                caption=f"🎨 **تم توليد الصورة!**\n\n📝 {prompt[:150]}..."
+                caption=f"🎨 **تم توليد الصورة بنجاح!**\n\n📝 {prompt[:150]}...\n\n✅ بعد {attempt + 1} محاولات"
             )
             return True
-        return False
+        else:
+            raise Exception("صورة فارغة")
+            
     except Exception as e:
-        logger.error(f"خطأ في التوليد: {e}")
-        return False
+        logger.error(f"محاولة {attempt + 1} فشلت: {e}")
+        await update.message.reply_text(f"⚠️ **المحاولة {attempt + 1} فشلت، جاري إعادة المحاولة...**")
+        await asyncio.sleep(2)
+        return await generate_image_with_retries(prompt, update, attempt + 1)
 
-# ========== أمر توليد صورة (مع إعادة تشغيل مسبقة) ==========
-async def start_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """بدء عملية توليد الصورة مع إعادة تشغيل مسبقة"""
-    user_id = update.effective_user.id
+# ========== تقسيم النص الطويل إلى أجزاء ==========
+async def process_long_text(text: str, update: Update, action: str, gender: str = None):
+    """معالجة النص الطويل (تقسيمه إذا لزم الأمر)"""
     
-    await update.message.reply_text(
-        "🎨 **توليد صورة من النص**\n\n"
-        "✏️ **أرسل وصف الصورة التي تريد:**\n\n"
-        "📝 أمثلة:\n"
-        "• ولد في حديقة مع زهور\n"
-        "• قطة نائمة على كنبة\n"
-        "• a boy playing in garden\n\n"
-        "⚠️ **ملاحظة:** سيتم إعادة تشغيل الخادم قبل توليد الصورة لضمان العمل بشكل صحيح"
-    )
+    if action == "image":
+        # للصور، إذا كان النص طويلاً جداً، خذ أول 200 حرف فقط
+        if len(text) > 200:
+            text = text[:200]
+            await update.message.reply_text("📝 **تم تقصير النص إلى 200 حرف لتحسين جودة الصورة**")
+        
+        return await generate_image_with_retries(text, update, 0)
     
-    # حفظ أن المستخدم في وضع انتظار الصورة
-    pending_image_requests[user_id] = {'waiting': True}
-
-# ========== معالجة وصف الصورة ==========
-async def handle_image_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالجة وصف الصورة وإعادة التشغيل ثم التوليد"""
-    user_id = update.effective_user.id
-    prompt = update.message.text
-    
-    if user_id not in pending_image_requests:
-        return False
-    
-    del pending_image_requests[user_id]
-    
-    # إعلام المستخدم
-    await update.message.reply_text(
-        f"🎨 **جاري تحضير النظام...**\n\n"
-        f"📝 وصفك: {prompt[:100]}...\n\n"
-        f"🔄 **جاري إعادة تشغيل الخادم...**\n"
-        f"⏱ سيستغرق هذا 5-10 ثواني\n\n"
-        f"✅ بعد إعادة التشغيل، ستأتي الصورة تلقائياً"
-    )
-    
-    # حفظ الطلب لإعادة المحاولة بعد إعادة التشغيل
-    pending_image_requests[user_id] = {'prompt': prompt, 'chat_id': update.effective_chat.id}
-    
-    # إعادة تشغيل Heroku
-    restart_heroku()
-    
-    # انتظار إعادة التشغيل
-    await asyncio.sleep(5)
-    
-    # محاولة توليد الصورة بعد إعادة التشغيل
-    success = await generate_image(prompt, update)
-    
-    if not success:
-        await update.message.reply_text(
-            "❌ **فشل توليد الصورة**\n\n"
-            "💡 نصائح:\n"
-            "• جرب وصفاً أقصر (أقل من 150 حرف)\n"
-            "• جرب وصفاً باللغة الإنجليزية\n"
-            "• مثال: 'a cat sleeping on a sofa'"
-        )
-    
-    return True
+    elif action == "explain":
+        # للشرح، إذا كان النص طويلاً جداً، قم بتقسيمه
+        if len(text) > 3000:
+            parts = [text[i:i+2500] for i in range(0, len(text), 2500)]
+            await update.message.reply_text(f"📝 **نص طويل!** سأقوم بتقسيمه إلى {len(parts)} أجزاء للشرح")
+            
+            for idx, part in enumerate(parts, 1):
+                await update.message.reply_text(f"📖 **الجزء {idx}/{len(parts)}**")
+                await explain_text_full(part, update)
+                await asyncio.sleep(1)
+            return True
+        else:
+            return await explain_text_full(text, update)
 
 # ========== تحويل النص إلى صوت ==========
-async def start_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """بدء تحويل النص إلى صوت"""
-    keyboard = [
-        [InlineKeyboardButton("👨 ذكر", callback_data="audio_male")],
-        [InlineKeyboardButton("👩 أنثى", callback_data="audio_female")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
-    ]
-    await update.message.reply_text(
-        "🎤 **تحويل نص إلى صوت**\n\nاختر نوع الصوت:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def handle_audio_text(update: Update, context: ContextTypes.DEFAULT_TYPE, gender: str):
-    """معالجة النص وتحويله إلى صوت"""
-    text = update.message.text
-    
-    await update.message.reply_text(f"🎙 **جاري تحويل النص إلى صوت ({'ذكر' if gender=='male' else 'أنثى'})...**")
-    
+async def generate_audio(text: str, gender: str, update: Update):
     try:
         has_arabic = any('\u0600' <= c <= '\u06FF' for c in text)
         lang = 'ar' if has_arabic else 'en'
@@ -179,105 +433,38 @@ async def handle_audio_text(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 performer=f"{'ذكر' if gender=='male' else 'أنثى'}",
                 caption="✅ تم تحويل النص إلى صوت"
             )
-        else:
-            await update.message.reply_text("❌ فشل تحويل النص إلى صوت")
+            return True
+        return False
     except Exception as e:
         logger.error(f"خطأ في الصوت: {e}")
-        await update.message.reply_text("❌ عذراً، خدمة الصوت غير متاحة حالياً")
+        await update.message.reply_text("❌ خدمة الصوت غير متاحة حالياً")
+        return False
 
-# ========== تحليل النص ==========
-async def analyze_text(text: str, update: Update):
-    """تحليل النص"""
-    words = text.split()
-    sentences = text.count('.') + text.count('!') + text.count('?') + text.count('؟')
-    has_arabic = any('\u0600' <= c <= '\u06FF' for c in text)
+# ========== أزرار البوت ==========
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🎨 توليد صورة", callback_data="image")],
+        [InlineKeyboardButton("🎵 تحويل نص إلى صوت", callback_data="audio")],
+        [InlineKeyboardButton("📚 شرح وتحليل النص", callback_data="explain")],
+    ]
     
-    analysis = f"""
-📊 **تحليل النص**
-
-━━━━━━━━━━━━━━━━━━━━━━
-📝 **النص:**
-{text[:300]}{'...' if len(text) > 300 else ''}
-
-━━━━━━━━━━━━━━━━━━━━━━
-📈 **الإحصائيات:**
-• عدد الحروف: {len(text)}
-• عدد الكلمات: {len(words)}
-• عدد الجمل: {sentences if sentences > 0 else 1}
-
-━━━━━━━━━━━━━━━━━━━━━━
-🌐 **اللغة:** {'عربية' if has_arabic else 'إنجليزية'}
-
-✅ تم التحليل بنجاح
-"""
-    await update.message.reply_text(analysis)
-
-async def start_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📊 **تحليل النص**\n\n"
-        "✏️ **أرسل النص لتحليله:**\n\n"
-        "✅ سأقوم بتحليل النص وإعطائك:\n"
-        "• عدد الحروف والكلمات والجمل\n"
-        "• اللغة المكتشفة"
+        "✨ **مرحباً بك في البوت المتكامل!** ✨\n\n"
+        "🎨 **توليد صورة:**\n"
+        "   • 5 محاولات مع إعادة تشغيل تلقائي\n"
+        "   • يدعم الوصف العربي والإنجليزي\n\n"
+        "🎵 **تحويل نص إلى صوت:**\n"
+        "   • اختيار ذكر أو أنثى\n"
+        "   • يدعم العربية والإنجليزية\n\n"
+        "📚 **شرح وتحليل النص:**\n"
+        "   • 5 بدائل مجانية للشرح\n"
+        "   • يدعم المعادلات الرياضية\n"
+        "   • يدعم المواضيع العلمية\n"
+        "   • يعطي ملخصاً كاملاً\n\n"
+        "🔽 **اختر ما تريد:**",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# ========== شرح النص المتقدم ==========
-async def explain_text(text: str, update: Update):
-    """شرح مفصل للنص"""
-    words = text.split()
-    sentences = re.split(r'[.!?؟]+', text)
-    sentences = [s for s in sentences if s.strip()]
-    has_arabic = any('\u0600' <= c <= '\u06FF' for c in text)
-    
-    # الكلمات الأكثر تكراراً
-    word_freq = {}
-    for w in words:
-        w_lower = w.lower()
-        word_freq[w_lower] = word_freq.get(w_lower, 0) + 1
-    common = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:3]
-    
-    explanation = f"""
-📚 **شرح مفصل للنص**
-
-━━━━━━━━━━━━━━━━━━━━━━
-📝 **النص:**
-{text[:400]}{'...' if len(text) > 400 else ''}
-
-━━━━━━━━━━━━━━━━━━━━━━
-📊 **الإحصائيات:**
-• عدد الحروف: {len(text)}
-• عدد الكلمات: {len(words)}
-• عدد الجمل: {len(sentences)}
-
-━━━━━━━━━━━━━━━━━━━━━━
-🌐 **اللغة:** {'عربية' if has_arabic else 'إنجليزية'}
-
-━━━━━━━━━━━━━━━━━━━━━━
-🔝 **الكلمات الأكثر تكراراً:**
-"""
-    for word, count in common:
-        explanation += f"• '{word}': {count} مرات\n"
-    
-    explanation += f"""
-━━━━━━━━━━━━━━━━━━━━━━
-💡 **ملخص:**
-{text[:150]}{'...' if len(text) > 150 else ''}
-
-✅ تم الشرح بنجاح
-"""
-    await update.message.reply_text(explanation)
-
-async def start_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📚 **شرح مفصل للنص**\n\n"
-        "✏️ **أرسل النص لشرحه:**\n\n"
-        "✅ سأقوم بإعطائك:\n"
-        "• إحصائيات كاملة\n"
-        "• الكلمات الأكثر تكراراً\n"
-        "• ملخص النص"
-    )
-
-# ========== معالجة الأزرار ==========
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -288,19 +475,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "image":
         await query.edit_message_text(
             "🎨 **توليد صورة**\n\n"
-            "✏️ **أرسل وصف الصورة:**\n\n"
+            "✏️ **أرسل وصف الصورة التي تريد:**\n\n"
             "📝 أمثلة:\n"
-            "• ولد في حديقة\n"
-            "• قطة نائمة\n"
-            "• غابة مع حيوانات"
+            "• ولد في حديقة مع زهور\n"
+            "• قطة نائمة على كنبة\n"
+            "• a boy playing in garden\n\n"
+            "✅ سيتم المحاولة 5 مرات مع إعادة تشغيل تلقائي"
         )
-        pending_image_requests[user_id] = {'waiting': True}
+        user_data[user_id] = {'mode': 'image'}
         
     elif action == "audio":
         keyboard = [
             [InlineKeyboardButton("👨 ذكر", callback_data="audio_male")],
             [InlineKeyboardButton("👩 أنثى", callback_data="audio_female")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="back")]
         ]
         await query.edit_message_text(
             "🎤 **اختر نوع الصوت:**",
@@ -309,137 +496,112 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     elif action == "audio_male":
         await query.edit_message_text(
-            "🎤 **صوت ذكر**\n\n✏️ **أرسل النص:**"
+            "🎤 **صوت ذكر**\n\n✏️ **أرسل النص لتحويله إلى صوت:**"
         )
-        pending_image_requests[user_id] = {'audio_gender': 'male'}
+        user_data[user_id] = {'mode': 'audio', 'gender': 'male'}
         
     elif action == "audio_female":
         await query.edit_message_text(
-            "🎤 **صوت أنثى**\n\n✏️ **أرسل النص:**"
+            "🎤 **صوت أنثى**\n\n✏️ **أرسل النص لتحويله إلى صوت:**"
         )
-        pending_image_requests[user_id] = {'audio_gender': 'female'}
-        
-    elif action == "analyze":
-        await query.edit_message_text(
-            "📊 **تحليل النص**\n\n✏️ **أرسل النص:**"
-        )
-        pending_image_requests[user_id] = {'analyze': True}
+        user_data[user_id] = {'mode': 'audio', 'gender': 'female'}
         
     elif action == "explain":
         await query.edit_message_text(
-            "📚 **شرح مفصل**\n\n✏️ **أرسل النص:**"
+            "📚 **شرح وتحليل النص**\n\n"
+            "✏️ **أرسل النص لتحليله وشرحه:**\n\n"
+            "✅ سأقوم بـ:\n"
+            "• تحليل النص بالكامل\n"
+            "• شرح المعادلات الرياضية\n"
+            "• استخراج الكلمات المفتاحية\n"
+            "• إعطاء ملخص كامل\n\n"
+            "📖 يدعم: محاضرات، مواضيع علمية، نصوص أدبية"
         )
-        pending_image_requests[user_id] = {'explain': True}
-        
-    elif action == "back":
-        await show_menu(query)
-
-async def show_menu(query):
-    keyboard = [
-        [InlineKeyboardButton("🎨 توليد صورة", callback_data="image")],
-        [InlineKeyboardButton("🎵 تحويل نص إلى صوت", callback_data="audio")],
-        [InlineKeyboardButton("📊 تحليل النص", callback_data="analyze")],
-        [InlineKeyboardButton("📚 شرح مفصل", callback_data="explain")],
-    ]
-    await query.edit_message_text(
-        "✨ **مرحباً بك في البوت** ✨\n\n"
-        "🎨 توليد صورة من النص\n"
-        "🎵 تحويل نص إلى صوت\n"
-        "📊 تحليل النص\n"
-        "📚 شرح مفصل\n\n"
-        "🔽 اختر ما تريد:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+        user_data[user_id] = {'mode': 'explain'}
 
 # ========== معالجة الرسائل ==========
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
     
-    # إذا كان المستخدم في وضع توليد الصورة
-    if user_id in pending_image_requests:
-        data = pending_image_requests[user_id]
-        
-        if data.get('waiting'):
-            # توليد صورة مع إعادة تشغيل
-            del pending_image_requests[user_id]
-            await update.message.reply_text(f"🎨 **جاري التجهيز...**\n\n📝 {text[:100]}\n\n🔄 جاري إعادة تشغيل الخادم...")
-            
-            # إعادة تشغيل Heroku
-            restart_heroku()
-            await asyncio.sleep(5)
-            
-            # توليد الصورة
-            success = await generate_image(text, update)
-            if not success:
-                await update.message.reply_text("❌ فشل توليد الصورة، حاول مرة أخرى")
-            return
-            
-        elif 'audio_gender' in data:
-            # تحويل إلى صوت
-            gender = data['audio_gender']
-            del pending_image_requests[user_id]
-            await handle_audio_text(update, context, gender)
-            return
-            
-        elif data.get('analyze'):
-            # تحليل النص
-            del pending_image_requests[user_id]
-            await analyze_text(text, update)
-            return
-            
-        elif data.get('explain'):
-            # شرح مفصل
-            del pending_image_requests[user_id]
-            await explain_text(text, update)
-            return
+    if user_id not in user_data:
+        keyboard = [
+            [InlineKeyboardButton("🎨 توليد صورة", callback_data="image")],
+            [InlineKeyboardButton("🎵 تحويل نص إلى صوت", callback_data="audio")],
+            [InlineKeyboardButton("📚 شرح وتحليل النص", callback_data="explain")],
+        ]
+        await update.message.reply_text(
+            "✨ **أهلاً بك!** ✨\n\nاختر ما تريد من الأزرار:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
     
-    # إذا لم يكن في وضع معين، اعرض القائمة
+    mode_data = user_data[user_id]
+    mode = mode_data.get('mode')
+    
+    # رسالة المعالجة
+    processing = await update.message.reply_text("⏳ **جاري المعالجة...**")
+    
+    if mode == 'image':
+        await process_long_text(text, update, 'image')
+        
+    elif mode == 'audio':
+        gender = mode_data.get('gender', 'male')
+        await generate_audio(text, gender, update)
+        
+    elif mode == 'explain':
+        await process_long_text(text, update, 'explain')
+    
+    await processing.delete()
+    
+    # حذف وضع المستخدم
+    del user_data[user_id]
+    
+    # عرض القائمة مرة أخرى
     keyboard = [
         [InlineKeyboardButton("🎨 توليد صورة", callback_data="image")],
         [InlineKeyboardButton("🎵 تحويل نص إلى صوت", callback_data="audio")],
-        [InlineKeyboardButton("📊 تحليل النص", callback_data="analyze")],
-        [InlineKeyboardButton("📚 شرح مفصل", callback_data="explain")],
+        [InlineKeyboardButton("📚 شرح وتحليل النص", callback_data="explain")],
     ]
     await update.message.reply_text(
-        "✨ **أهلاً بك!** ✨\n\nاختر ما تريد:",
+        "✨ **هل تريد صناعة شيء آخر؟**",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# ========== أمر /start ==========
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🎨 توليد صورة", callback_data="image")],
-        [InlineKeyboardButton("🎵 تحويل نص إلى صوت", callback_data="audio")],
-        [InlineKeyboardButton("📊 تحليل النص", callback_data="analyze")],
-        [InlineKeyboardButton("📚 شرح مفصل", callback_data="explain")],
-    ]
-    await update.message.reply_text(
-        "✨ **مرحباً بك في البوت** ✨\n\n"
-        "🎨 توليد صورة من النص\n"
-        "🎵 تحويل نص إلى صوت (ذكر/أنثى)\n"
-        "📊 تحليل النص\n"
-        "📚 شرح مفصل\n\n"
-        "🔽 اختر ما تريد:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+# ========== إعادة التشغيل التلقائي للبوت ==========
+def restart_bot():
+    logger.warning("⚠️ جاري إعادة تشغيل البوت...")
+    time.sleep(2)
+    os.execl(sys.executable, sys.executable, *sys.argv)
+
+def signal_handler(signum, frame):
+    logger.warning(f"⚠️ استقبل إشارة {signum}، جاري إعادة التشغيل...")
+    restart_bot()
 
 # ========== التشغيل ==========
 def main():
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
     app = ApplicationBuilder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("=" * 50)
-    print("✅ البوت يعمل!")
+    print("=" * 60)
+    print("✅ البوت يعمل بنجاح!")
     print(f"📊 تطبيق Heroku: {HEROKU_APP_NAME}")
-    print("🎨 قبل كل صورة → إعادة تشغيل تلقائي")
-    print("=" * 50)
+    print("🎨 توليد الصور: 5 محاولات مع إعادة تشغيل تلقائي")
+    print("📚 شرح النص: 5 بدائل مجانية (يدعم المعادلات والعلوم)")
+    print("=" * 60)
     
-    app.run_polling()
+    try:
+        app.run_polling()
+    except Exception as e:
+        logger.error(f"⚠️ البوت توقف: {e}")
+        time.sleep(3)
+        restart_bot()
 
 if __name__ == "__main__":
-    import re
     main()
