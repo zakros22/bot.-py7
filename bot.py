@@ -11,6 +11,7 @@ import random
 import re
 import sys
 import time
+import signal
 import subprocess
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -29,7 +30,7 @@ CHOOSING_ACTION, CHOOSING_AUDIO_GENDER, WAITING_FOR_TEXT_AUDIO, WAITING_FOR_TEXT
 
 # تخزين بيانات المستخدمين
 user_choices = {}
-user_pending_requests = {}  # تخزين الطلبات المعلقة
+user_pending_requests = {}
 
 # ========== مفاتيح API من Heroku ==========
 DEEPSEEK_KEYS = []
@@ -64,23 +65,24 @@ def restart_heroku_dyno():
         if HEROKU_APP_NAME:
             logger.info(f"🔄 جاري إعادة تشغيل Dyno: {HEROKU_APP_NAME}")
             
-            # طريقة 1: استخدام Heroku API
+            # استخدام Heroku API
             if HEROKU_API_KEY:
-                import requests
-                headers = {
-                    "Authorization": f"Bearer {HEROKU_API_KEY}",
-                    "Accept": "application/vnd.heroku+json; version=3",
-                    "Content-Type": "application/json"
-                }
-                url = f"https://api.heroku.com/apps/{HEROKU_APP_NAME}/dynos"
-                response = requests.delete(url, headers=headers)
-                if response.status_code in [200, 202]:
-                    logger.info("✅ تم إعادة تشغيل الـ Dyno عبر API")
-                    return True
-                else:
-                    logger.error(f"فشل API: {response.status_code}")
+                try:
+                    import requests
+                    headers = {
+                        "Authorization": f"Bearer {HEROKU_API_KEY}",
+                        "Accept": "application/vnd.heroku+json; version=3",
+                        "Content-Type": "application/json"
+                    }
+                    url = f"https://api.heroku.com/apps/{HEROKU_APP_NAME}/dynos"
+                    response = requests.delete(url, headers=headers)
+                    if response.status_code in [200, 202]:
+                        logger.info("✅ تم إعادة تشغيل الـ Dyno عبر API")
+                        return True
+                except:
+                    pass
             
-            # طريقة 2: استخدام CLI
+            # استخدام CLI
             try:
                 result = subprocess.run(
                     ["heroku", "restart", "-a", HEROKU_APP_NAME],
@@ -92,7 +94,7 @@ def restart_heroku_dyno():
             except:
                 pass
             
-            # طريقة 3: استخدام Scale (إيقاف ثم تشغيل)
+            # استخدام Scale
             try:
                 subprocess.run(
                     ["heroku", "ps:scale", "worker=0", "-a", HEROKU_APP_NAME],
@@ -111,6 +113,42 @@ def restart_heroku_dyno():
         return False
     except Exception as e:
         logger.error(f"خطأ في إعادة التشغيل: {e}")
+        return False
+
+# ========== صورة احتياطية محلية ==========
+async def image_local_fallback(prompt: str, update: Update):
+    """رسم صورة محلية"""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        
+        img = Image.new('RGB', (600, 400), color=(50, 50, 150))
+        draw = ImageDraw.Draw(img)
+        
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
+        except:
+            font = ImageFont.load_default()
+        
+        lines = [prompt[i:i+35] for i in range(0, len(prompt), 35)]
+        y = 50
+        for line in lines[:5]:
+            draw.text((50, y), line, fill=(255, 255, 255), font=font)
+            y += 30
+        
+        draw.text((50, y+20), "~ صورة احتياطية ~", fill=(200, 200, 200), font=font)
+        
+        img_buffer = io.BytesIO()
+        img.save(img_buffer, format='PNG')
+        img_buffer.seek(0)
+        img_buffer.name = "fallback_image.png"
+        
+        await update.message.reply_photo(
+            photo=img_buffer,
+            caption=f"🖼 **صورة احتياطية (محلية)**\n\n📝 {prompt[:150]}..."
+        )
+        return True
+    except:
+        await update.message.reply_text("❌ عذراً، جميع خدمات الصور غير متاحة. حاول مرة أخرى.")
         return False
 
 # ========== وظيفة توليد الصورة مع إعادة تشغيل مسبق ==========
@@ -178,15 +216,8 @@ async def generate_image_with_prerestart(prompt: str, update: Update, user_id: i
     if attempt + 1 < MAX_ATTEMPTS:
         await update.message.reply_text(
             f"⚠️ **المحاولة {attempt + 1} فشلت**\n\n"
-            f"🔄 جاري إعادة التشغيل والمحاولة مرة أخرى...\n"
-            f"📝 الطلب: {prompt[:100]}..."
+            f"🔄 جاري إعادة التشغيل والمحاولة مرة أخرى..."
         )
-        # حفظ الطلب لإعادة المحاولة
-        user_pending_requests[user_id] = {
-            'prompt': prompt,
-            'attempt': attempt + 1,
-            'chat_id': update.effective_chat.id
-        }
         return await generate_image_with_prerestart(prompt, update, user_id, attempt + 1)
     
     # إذا فشلت كل المحاولات، جرب البدائل
@@ -254,41 +285,6 @@ async def generate_image_with_prerestart(prompt: str, update: Update, user_id: i
     
     # الحل الأخير: رسم صورة محلية
     return await image_local_fallback(prompt, update)
-
-async def image_local_fallback(prompt: str, update: Update):
-    """رسم صورة محلية"""
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-        
-        img = Image.new('RGB', (600, 400), color=(50, 50, 150))
-        draw = ImageDraw.Draw(img)
-        
-        try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
-        except:
-            font = ImageFont.load_default()
-        
-        lines = [prompt[i:i+35] for i in range(0, len(prompt), 35)]
-        y = 50
-        for line in lines[:5]:
-            draw.text((50, y), line, fill=(255, 255, 255), font=font)
-            y += 30
-        
-        draw.text((50, y+20), "~ صورة احتياطية ~", fill=(200, 200, 200), font=font)
-        
-        img_buffer = io.BytesIO()
-        img.save(img_buffer, format='PNG')
-        img_buffer.seek(0)
-        img_buffer.name = "fallback_image.png"
-        
-        await update.message.reply_photo(
-            photo=img_buffer,
-            caption=f"🖼 **صورة احتياطية (محلية)**\n\n📝 {prompt[:150]}..."
-        )
-        return True
-    except:
-        await update.message.reply_text("❌ عذراً، جميع خدمات الصور غير متاحة. حاول مرة أخرى.")
-        return False
 
 # ========== تقسيم النص الطويل ==========
 async def generate_images_for_long_text(text: str, update: Update, user_id: int):
